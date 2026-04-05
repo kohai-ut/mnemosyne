@@ -284,7 +284,6 @@ MIT License — See [LICENSE](LICENSE)
 
 - **Issues:** [GitHub Issues](https://github.com/AxDSan/mnemosyne/issues)
 - **Hermes Docs:** [github.com/AxDSan/hermes](https://github.com/AxDSan/hermes)
-- **Email:** aj@fluxspeak.ai
 
 ---
 
