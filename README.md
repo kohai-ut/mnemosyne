@@ -4,7 +4,7 @@
 > Zero-cloud. Sub-millisecond latency. Complete privacy. Now with dense retrieval.
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
-[![SQLite](https://img.shields.io/badge/SQLite-3.35+-green.svg)](https://sqlite.org)
+[![SQLite](https://img.shields.io/badge/SQLite-3.35+-green.svg)](https://sqlite.org/codeofethics.html)
 [![Hermes](https://img.shields.io/badge/Built%20for-Hermes%20Agent-purple.svg)](https://github.com/AxDSan/hermes)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
@@ -339,6 +339,7 @@ python -m mnemosyne.cli stats
 - **Instant backup** — `cp mnemosyne.db backup.db`
 - **Portable** — Move the DB file, move your memories
 - **Reliable** — 20+ years of production testing
+- **Shared values** — Guided by the same [Code of Ethics](https://sqlite.org/codeofethics.html) that shapes SQLite
 
 ---
 
@@ -446,7 +447,7 @@ MIT License — See [LICENSE](LICENSE)
 - **Hermes Agent Framework** — The reason Mnemosyne exists
 - **Honcho** (plasticlabs) — For defining the stateful memory space
 - **Mempalace** — For proving that local-first memory can beat cloud solutions on benchmarks
-- **SQLite** — The world's most deployed database
+- **[SQLite](https://sqlite.org/codeofethics.html)** — The world's most deployed database
 
 ---
 
