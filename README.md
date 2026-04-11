@@ -210,6 +210,16 @@ pip install fastembed
 
 Without `fastembed`, Mnemosyne falls back to keyword-only retrieval (functional but not competitive on semantic benchmarks).
 
+### Optional: Auto-Log Tool Calls
+
+By default, Mnemosyne **does not** automatically save every `terminal`, `execute_code`, or `write_file` call to memory. If you want to opt into that behavior, set:
+
+```bash
+export MNEMOSYNE_LOG_TOOLS=1
+```
+
+We disable this by default because it rapidly floods working memory with operational noise, making recall and context injection less useful.
+
 ### Option 2: pip (Standalone Use)
 
 ```bash

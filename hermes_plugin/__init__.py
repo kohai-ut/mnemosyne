@@ -6,6 +6,7 @@ This plugin provides seamless memory integration for Hermes agents,
 automatically injecting relevant context before every LLM call.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -155,23 +156,32 @@ def _on_pre_llm_call(session_id, history, **kwargs):
 
 def _on_post_tool_call(tool_name, args, result, **kwargs):
     """
-    Auto-save important tool calls to memory.
-    
-    This captures tool usage patterns and outcomes for future reference.
+    Hook for post-tool-call processing.
+
+    Auto-logging of tool calls is disabled by default because it quickly
+    floods working_memory with low-signal operational noise (every terminal
+    command, file write, etc.). Users can opt-in via MNEMOSYNE_LOG_TOOLS=1.
+
+    If you want to remember the outcome of a tool call, use mnemosyne_remember
+    explicitly from the conversation instead.
     """
     try:
+        if not os.environ.get("MNEMOSYNE_LOG_TOOLS"):
+            return
+
         mem = _get_memory()
-        
-        # Auto-store important tool calls
+
+        # Only log if explicitly opted in; keep importance low so these
+        # don't pollute prompt context injection.
         if tool_name in ['terminal', 'execute_code', 'write_file', 'patch']:
             summary = f"Tool {tool_name} executed"
             if args:
                 summary += f" with args: {str(args)[:100]}"
-            
+
             mem.remember(
                 content=f"[TOOL] {summary}",
                 source="tool_execution",
-                importance=0.6
+                importance=0.1
             )
     except:
         pass  # Fail silently

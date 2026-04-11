@@ -236,6 +236,7 @@ def migrate_legacy_db(legacy_path: Path, canonical_conn: sqlite3.Connection, dry
 def main():
     parser = argparse.ArgumentParser(description="Migrate legacy Mnemosyne databases to the current canonical path")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
+    parser.add_argument("--purge-tools", action="store_true", help="Remove legacy auto-logged tool_execution memories after migration")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -252,7 +253,9 @@ def main():
     cursor = canonical_conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM memories")
     pre_total = cursor.fetchone()[0]
-    print(f"Current canonical DB has {pre_total} memories")
+    cursor.execute("SELECT COUNT(*) FROM memories WHERE source = 'tool_execution'")
+    pre_tools = cursor.fetchone()[0]
+    print(f"Current canonical DB has {pre_total} memories ({pre_tools} tool_execution)")
 
     total_stats = {"memories_copied": 0, "embeddings_copied": 0, "episodic_migrated": 0, "working_migrated": 0}
     any_found = False
@@ -265,10 +268,23 @@ def main():
             for k in total_stats:
                 total_stats[k] += stats[k]
 
-    if not any_found:
-        print("\n✅ No legacy databases found. Nothing to migrate.")
+    if not any_found and pre_total == 0:
+        print("\n✅ No legacy databases found and canonical DB is empty. Nothing to migrate.")
         canonical_conn.close()
         return 0
+
+    # Purge tool_execution noise if requested
+    purged_tools = 0
+    if args.purge_tools and not args.dry_run:
+        cursor.execute("DELETE FROM memories WHERE source = 'tool_execution'")
+        cursor.execute("DELETE FROM working_memory WHERE source = 'tool_execution'")
+        purged_tools = cursor.rowcount
+        canonical_conn.commit()
+        print(f"\n🧹 Purged {purged_tools} tool_execution memories from canonical DB")
+    elif args.purge_tools and args.dry_run:
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE source = 'tool_execution'")
+        would_purge = cursor.fetchone()[0]
+        print(f"\n[DRY-RUN] Would purge {would_purge} tool_execution memories")
 
     if args.dry_run:
         print("\n🏁 Dry-run complete. No changes were made.")
@@ -280,6 +296,8 @@ def main():
         print(f"  Embeddings copied:  {total_stats['embeddings_copied']}")
         print(f"  Episodic migrated:  {total_stats['episodic_migrated']}")
         print(f"  Working promoted:   {total_stats['working_migrated']}")
+        if purged_tools:
+            print(f"  Tool memories purged: {purged_tools}")
         print(f"  Total in canonical: {post_total} (was {pre_total})")
 
     canonical_conn.close()
