@@ -3,18 +3,20 @@
 Mnemosyne Legacy Migration Script
 =================================
 
-Migrates memories from old Mnemosyne databases to the current canonical DB path.
+Migrates memories from ephemeral/legacy databases to the PERSISTED canonical path.
 
-Problem: Early Mnemosyne versions used ~/.hermes/mnemosyne/data/mnemosyne_native.db
-Later BEAM versions moved to ~/.mnemosyne/data/mnemosyne.db. This script detects
-old databases and merges them into the new one safely.
+CRITICAL for Fly.io / ephemeral VMs: Only ~/.hermes is persisted across restarts!
+- Source: ~/.mnemosyne/data/mnemosyne.db (ephemeral — lost on restart)
+- Target: ~/.hermes/mnemosyne/data/mnemosyne.db (persisted)
+
+Also migrates legacy mnemosyne_native.db files from earlier versions.
 
 Usage:
     python scripts/migrate_from_legacy.py [--dry-run]
 
 What it does:
-1. Scans known legacy database paths
-2. Copies missing memories into the current canonical DB
+1. Scans ephemeral and legacy database paths
+2. Copies missing memories into the persisted canonical DB
 3. Migrates meaningful non-tool memories into BEAM episodic_memory
 4. Promotes high-importance memories into working_memory
 5. Preserves all existing data (idempotent — safe to run multiple times)
@@ -25,14 +27,15 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Current canonical path (matches mnemosyne.core.memory.DEFAULT_DB_PATH)
-CANONICAL_DB = Path.home() / ".mnemosyne" / "data" / "mnemosyne.db"
+# Current canonical path (matches mnemosyne.core.beam DEFAULT_DB_PATH)
+# NOTE: On Fly.io and other ephemeral VMs, ~/.hermes is the only persisted path.
+CANONICAL_DB = Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne.db"
 
-# Legacy paths to scan and migrate from
+# Legacy / ephemeral paths to scan and migrate from
 LEGACY_CANDIDATES = [
-    Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne_native.db",
-    Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne.db",
+    Path.home() / ".mnemosyne" / "data" / "mnemosyne.db",  # ephemeral BEAM data
     Path.home() / ".mnemosyne" / "data" / "mnemosyne_native.db",
+    Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne_native.db",
 ]
 
 
@@ -53,6 +56,12 @@ def ensure_schema(conn: sqlite3.Connection):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Some old canonical DBs were created without created_at
+    cursor.execute("PRAGMA table_info(memories)")
+    mem_cols = [r[1] for r in cursor.fetchall()]
+    if "created_at" not in mem_cols:
+        cursor.execute("ALTER TABLE memories ADD COLUMN created_at TIMESTAMP")
+        cursor.execute("UPDATE memories SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session ON memories(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timestamp)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_source ON memories(source)")

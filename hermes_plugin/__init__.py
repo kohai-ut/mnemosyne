@@ -10,12 +10,26 @@ import os
 import sys
 from pathlib import Path
 
-# Add parent directory to path for importing mnemosyne core
-plugin_dir = Path(__file__).resolve().parent
-sys.path.insert(0, str(plugin_dir.parent))
-
-from mnemosyne.core.memory import Mnemosyne
-from mnemosyne.core.aaak import encode as aaak_encode
+# Robust import: try installed package first, then fallback to known paths
+_try_paths = []
+try:
+    from mnemosyne.core.memory import Mnemosyne
+    from mnemosyne.core.aaak import encode as aaak_encode
+except ImportError:
+    # Fallback: search common locations
+    _candidates = [
+        Path.home() / ".hermes" / "projects" / "mnemosyne",
+        Path(__file__).resolve().parent.parent,  # repo layout
+    ]
+    for _cand in _candidates:
+        if (_cand / "mnemosyne" / "core" / "memory.py").exists():
+            _path = str(_cand)
+            if _path not in sys.path:
+                sys.path.insert(0, _path)
+            _try_paths.append(_path)
+            break
+    from mnemosyne.core.memory import Mnemosyne
+    from mnemosyne.core.aaak import encode as aaak_encode
 
 # Global memory instance
 _memory_instance = None

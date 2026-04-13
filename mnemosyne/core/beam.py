@@ -17,6 +17,7 @@ import sqlite3
 import json
 import hashlib
 import threading
+import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -29,10 +30,13 @@ try:
     _SQLITE_VEC_AVAILABLE = True
 except Exception:
     _SQLITE_VEC_AVAILABLE = False
+    sqlite_vec = None
 
 _thread_local = threading.local()
 
-DEFAULT_DATA_DIR = Path.home() / ".mnemosyne" / "data"
+# On Fly.io and other ephemeral VMs, only ~/.hermes is persisted.
+# Default to the legacy Hermes path so memories survive restarts.
+DEFAULT_DATA_DIR = Path.home() / ".hermes" / "mnemosyne" / "data"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "mnemosyne.db"
 
 import os
@@ -47,6 +51,11 @@ WORKING_MEMORY_TTL_HOURS = int(os.environ.get("MNEMOSYNE_WM_TTL_HOURS", "24"))
 EPISODIC_RECALL_LIMIT = int(os.environ.get("MNEMOSYNE_EP_LIMIT", "50000"))
 SLEEP_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_SLEEP_BATCH", "5000"))
 SCRATCHPAD_MAX_ITEMS = int(os.environ.get("MNEMOSYNE_SP_MAX", "1000"))
+
+# Vector compression: float32 | int8 | bit
+VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
+if VEC_TYPE not in ("float32", "int8", "bit"):
+    VEC_TYPE = "float32"
 
 
 def _get_connection(db_path: Path = None) -> sqlite3.Connection:
@@ -65,6 +74,36 @@ def _get_connection(db_path: Path = None) -> sqlite3.Connection:
         _thread_local.conn = conn
         _thread_local.db_path = str(path)
     return _thread_local.conn
+
+
+def _detect_vec_type(conn: sqlite3.Connection) -> str:
+    """
+    Detect whether sqlite-vec supports int8/bit.
+    Falls back to float32 if the requested type is unavailable.
+    """
+    if not _SQLITE_VEC_AVAILABLE:
+        return "float32"
+    if VEC_TYPE == "float32":
+        return "float32"
+    cursor = conn.cursor()
+    test_type = VEC_TYPE  # int8 or bit
+    try:
+        cursor.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS _vec_test USING vec0(embedding {test_type}[{EMBEDDING_DIM}])")
+        cursor.execute("DROP TABLE IF EXISTS _vec_test")
+        conn.commit()
+        return test_type
+    except Exception:
+        conn.rollback()
+        # Try int8 as fallback from bit
+        if test_type == "bit":
+            try:
+                cursor.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS _vec_test USING vec0(embedding int8[{EMBEDDING_DIM}])")
+                cursor.execute("DROP TABLE IF EXISTS _vec_test")
+                conn.commit()
+                return "int8"
+            except Exception:
+                conn.rollback()
+        return "float32"
 
 
 def init_beam(db_path: Path = None):
@@ -90,7 +129,6 @@ def init_beam(db_path: Path = None):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wm_source ON working_memory(source)")
 
     # --- EPISODIC MEMORY ---
-    # rowid is INTEGER PRIMARY KEY for sqlite-vec join
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS episodic_memory (
             rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +139,7 @@ def init_beam(db_path: Path = None):
             session_id TEXT DEFAULT 'default',
             importance REAL DEFAULT 0.5,
             metadata_json TEXT,
-            summary_of TEXT DEFAULT '',  -- comma-separated working_memory ids
+            summary_of TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -121,18 +159,21 @@ def init_beam(db_path: Path = None):
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sp_session ON scratchpad(session_id)")
 
+    # Detect supported vector type
+    effective_vec_type = _detect_vec_type(conn)
+
     # --- sqlite-vec VIRTUAL TABLE ---
     if _SQLITE_VEC_AVAILABLE:
         try:
             cursor.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes USING vec0(
-                    embedding float[{EMBEDDING_DIM}]
+                    embedding {effective_vec_type}[{EMBEDDING_DIM}]
                 )
             """)
         except sqlite3.OperationalError:
             pass  # May already exist or extension not loadable
 
-    # --- FTS5 VIRTUAL TABLE ---
+    # --- FTS5 VIRTUAL TABLE for episodic ---
     cursor.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS fts_episodes USING fts5(
             content,
@@ -141,7 +182,15 @@ def init_beam(db_path: Path = None):
         )
     """)
 
-    # --- FTS5 Triggers ---
+    # --- FTS5 VIRTUAL TABLE for working memory (autonomous) ---
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts_working USING fts5(
+            id UNINDEXED,
+            content
+        )
+    """)
+
+    # --- FTS5 Triggers for episodic ---
     cursor.execute("""
         CREATE TRIGGER IF NOT EXISTS em_ai AFTER INSERT ON episodic_memory BEGIN
             INSERT INTO fts_episodes(rowid, content) VALUES (new.rowid, new.content);
@@ -156,6 +205,24 @@ def init_beam(db_path: Path = None):
         CREATE TRIGGER IF NOT EXISTS em_au AFTER UPDATE ON episodic_memory BEGIN
             INSERT INTO fts_episodes(fts_episodes, rowid, content) VALUES ('delete', old.rowid, old.content);
             INSERT INTO fts_episodes(rowid, content) VALUES (new.rowid, new.content);
+        END
+    """)
+
+    # --- FTS5 Triggers for working memory ---
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS wm_ai AFTER INSERT ON working_memory BEGIN
+            INSERT INTO fts_working(id, content) VALUES (new.id, new.content);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS wm_ad AFTER DELETE ON working_memory BEGIN
+            DELETE FROM fts_working WHERE id = old.id;
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS wm_au AFTER UPDATE ON working_memory BEGIN
+            DELETE FROM fts_working WHERE id = old.id;
+            INSERT INTO fts_working(id, content) VALUES (new.id, new.content);
         END
     """)
 
@@ -187,25 +254,77 @@ def _vec_available(conn: sqlite3.Connection) -> bool:
         return False
 
 
+_vec_type_cache: Dict[int, str] = {}
+
+
+def _effective_vec_type(conn: sqlite3.Connection) -> str:
+    """Re-detect the actual vector type used by vec_episodes."""
+    if not _vec_available(conn):
+        return "float32"
+    cid = id(conn)
+    if cid in _vec_type_cache:
+        return _vec_type_cache[cid]
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'"
+        ).fetchone()
+        if row and "int8" in row[0]:
+            _vec_type_cache[cid] = "int8"
+            return "int8"
+        if row and "bit" in row[0]:
+            _vec_type_cache[cid] = "bit"
+            return "bit"
+    except Exception:
+        pass
+    _vec_type_cache[cid] = "float32"
+    return "float32"
+
+
 def _vec_insert(conn: sqlite3.Connection, rowid: int, embedding: List[float]):
-    """Insert embedding into sqlite-vec table."""
+    """Insert embedding into sqlite-vec table with quantization via SQL functions."""
+    vec_type = _effective_vec_type(conn)
     emb_json = json.dumps(embedding)
-    conn.execute("INSERT INTO vec_episodes(rowid, embedding) VALUES (?, ?)", (rowid, emb_json))
+    if vec_type == "bit":
+        conn.execute(
+            "INSERT INTO vec_episodes(rowid, embedding) VALUES (?, vec_quantize_binary(?))",
+            (rowid, emb_json)
+        )
+    elif vec_type == "int8":
+        conn.execute(
+            "INSERT INTO vec_episodes(rowid, embedding) VALUES (?, vec_quantize_int8(?, 'unit'))",
+            (rowid, emb_json)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO vec_episodes(rowid, embedding) VALUES (?, ?)",
+            (rowid, emb_json)
+        )
 
 
 def _vec_search(conn: sqlite3.Connection, embedding: List[float], k: int = 20) -> List[Dict]:
     """Search sqlite-vec and return rowids with distances."""
+    vec_type = _effective_vec_type(conn)
     emb_json = json.dumps(embedding)
-    rows = conn.execute(
-        "SELECT rowid, distance FROM vec_episodes WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-        (emb_json, k)
-    ).fetchall()
+    if vec_type == "bit":
+        rows = conn.execute(
+            "SELECT rowid, distance FROM vec_episodes WHERE embedding MATCH vec_quantize_binary(?) ORDER BY distance LIMIT ?",
+            (emb_json, k)
+        ).fetchall()
+    elif vec_type == "int8":
+        rows = conn.execute(
+            "SELECT rowid, distance FROM vec_episodes WHERE embedding MATCH vec_quantize_int8(?, 'unit') ORDER BY distance LIMIT ?",
+            (emb_json, k)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT rowid, distance FROM vec_episodes WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (emb_json, k)
+        ).fetchall()
     return [{"rowid": r["rowid"], "distance": r["distance"]} for r in rows]
 
 
 def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]:
-    """Search FTS5 and return rowids with ranks."""
-    # Sanitize query for FTS5
+    """Search FTS5 episodes and return rowids with ranks."""
     safe_query = " ".join(f'"{w}"' for w in query.split() if w)
     if not safe_query:
         return []
@@ -214,6 +333,18 @@ def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]
         (safe_query, k)
     ).fetchall()
     return [{"rowid": r["rowid"], "rank": r["rank"]} for r in rows]
+
+
+def _fts_search_working(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]:
+    """Search FTS5 working memory and return ids with ranks."""
+    safe_query = " ".join(f'"{w}"' for w in query.split() if w)
+    if not safe_query:
+        return []
+    rows = conn.execute(
+        "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank LIMIT ?",
+        (safe_query, k)
+    ).fetchall()
+    return [{"id": r["id"], "rank": r["rank"]} for r in rows]
 
 
 class BeamMemory:
@@ -243,6 +374,33 @@ class BeamMemory:
         self.conn.commit()
         self._trim_working_memory()
         return memory_id
+
+    def remember_batch(self, items: List[Dict]) -> List[str]:
+        """
+        Batch insert into working_memory for high-throughput ingestion.
+        Each item dict should have keys: content, source, importance, metadata (optional).
+        """
+        cursor = self.conn.cursor()
+        ids = []
+        timestamp = datetime.now().isoformat()
+        for item in items:
+            memory_id = _generate_id(item["content"])
+            ids.append(memory_id)
+            cursor.execute("""
+                INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                memory_id,
+                item["content"],
+                item.get("source", "conversation"),
+                timestamp,
+                self.session_id,
+                item.get("importance", 0.5),
+                json.dumps(item.get("metadata") or {})
+            ))
+        self.conn.commit()
+        self._trim_working_memory()
+        return ids
 
     def _trim_working_memory(self):
         """Keep working_memory within size/time limits."""
@@ -317,27 +475,58 @@ class BeamMemory:
     def recall(self, query: str, top_k: int = 5) -> List[Dict]:
         """
         Hybrid recall across working_memory + episodic_memory.
-        Uses sqlite-vec + FTS5 for episodic, keyword overlap for working.
+        Uses sqlite-vec + FTS5 for episodic, FTS5 for working.
+        Falls back to recency-only for working memory if FTS5 unavailable.
         """
+        results = []
         query_lower = query.lower()
         query_words = query_lower.split()
-        results = []
 
-        # ---- Working memory (keyword + recency) ----
-        cursor = self.conn.cursor()
-        cursor.execute(f"""
-            SELECT id, content, source, timestamp, importance
-            FROM working_memory
-            WHERE session_id = ?
-            ORDER BY timestamp DESC
-            LIMIT {EPISODIC_RECALL_LIMIT}
-        """, (self.session_id,))
-        for row in cursor.fetchall():
+        # ---- Working memory (FTS5 fast path) ----
+        try:
+            wm_fts = _fts_search_working(self.conn, query, k=max(top_k * 3, 50))
+        except Exception:
+            wm_fts = []
+
+        wm_ids = {r["id"] for r in wm_fts}
+        wm_ranks = {r["id"]: r["rank"] for r in wm_fts}
+
+        if wm_ids:
+            placeholders = ",".join("?" * len(wm_ids))
+            cursor = self.conn.cursor()
+            cursor.execute(f"""
+                SELECT id, content, source, timestamp, importance
+                FROM working_memory
+                WHERE id IN ({placeholders}) AND session_id = ?
+            """, (*tuple(wm_ids), self.session_id))
+            rows = cursor.fetchall()
+        else:
+            # Fallback: fetch recent items and score in Python (old path)
+            cursor = self.conn.cursor()
+            cursor.execute(f"""
+                SELECT id, content, source, timestamp, importance
+                FROM working_memory
+                WHERE session_id = ?
+                ORDER BY timestamp DESC
+                LIMIT {min(EPISODIC_RECALL_LIMIT, 2000)}
+            """, (self.session_id,))
+            rows = cursor.fetchall()
+
+        if wm_ranks:
+            min_rank = min(wm_ranks.values())
+            max_rank = max(wm_ranks.values())
+            rng = max_rank - min_rank if max_rank != min_rank else 1.0
+
+        for row in rows:
             content_lower = row["content"].lower()
-            exact = sum(1 for w in query_words if w in content_lower)
-            partial = sum(1 for w in query_words for cw in content_lower.split() if w in cw or cw in w)
-            relevance = (exact * 1.0 + partial * 0.3) / max(len(query_words), 1)
-            if relevance > 0.05:
+            if wm_ranks and row["id"] in wm_ranks:
+                normalized = 1.0 - ((wm_ranks[row["id"]] - min_rank) / rng)
+                relevance = normalized
+            else:
+                exact = sum(1 for w in query_words if w in content_lower)
+                partial = sum(1 for w in query_words for cw in content_lower.split() if w in cw or cw in w)
+                relevance = (exact * 1.0 + partial * 0.3) / max(len(query_words), 1)
+            if relevance > 0.05 or wm_ranks:
                 score = relevance * 0.35 + row["importance"] * 0.2
                 results.append({
                     "id": row["id"],
@@ -348,25 +537,23 @@ class BeamMemory:
                     "score": round(score, 4),
                     "keyword_score": round(relevance, 4),
                     "dense_score": 0.0,
-                    "fts_score": 0.0,
+                    "fts_score": round(relevance, 4) if wm_ranks else 0.0,
                     "importance": row["importance"]
                 })
 
         # ---- Episodic memory (vec + FTS5 hybrid) ----
         vec_results = {}
         if _embeddings.available() and _vec_available(self.conn):
-            emb_result = _embeddings.embed([query])
+            emb_result = _embeddings.embed_query(query)
             if emb_result is not None:
-                vec_rows = _vec_search(self.conn, emb_result[0].tolist(), k=max(top_k * 3, 20))
+                vec_rows = _vec_search(self.conn, emb_result.tolist(), k=max(top_k * 3, 20))
                 for vr in vec_rows:
-                    # distance is cosine distance in sqlite-vec
                     sim = max(0.0, 1.0 - vr["distance"])
                     vec_results[vr["rowid"]] = sim
 
         fts_results = {}
         fts_rows = _fts_search(self.conn, query, k=max(top_k * 3, 20))
         if fts_rows:
-            # rank from FTS5 is bm25; lower is better. Normalize roughly.
             min_rank = min(r["rank"] for r in fts_rows)
             max_rank = max(r["rank"] for r in fts_rows)
             rng = max_rank - min_rank if max_rank != min_rank else 1.0
@@ -374,10 +561,10 @@ class BeamMemory:
                 normalized = 1.0 - ((fr["rank"] - min_rank) / rng)
                 fts_results[fr["rowid"]] = normalized
 
-        # Fetch episodic rows that appeared in either search
         episodic_rowids = set(vec_results.keys()) | set(fts_results.keys())
         if episodic_rowids:
             placeholders = ",".join("?" * len(episodic_rowids))
+            cursor = self.conn.cursor()
             cursor.execute(f"""
                 SELECT rowid, id, content, source, timestamp, importance
                 FROM episodic_memory
@@ -387,7 +574,6 @@ class BeamMemory:
                 rid = row["rowid"]
                 sim = vec_results.get(rid, 0.0)
                 fts = fts_results.get(rid, 0.0)
-                # Hybrid: 50% vec, 30% fts, 20% importance
                 score = sim * 0.5 + fts * 0.3 + row["importance"] * 0.2
                 results.append({
                     "id": row["id"],
@@ -412,12 +598,14 @@ class BeamMemory:
         cursor.execute("SELECT timestamp FROM episodic_memory WHERE session_id = ? ORDER BY timestamp DESC LIMIT 1", (self.session_id,))
         last = cursor.fetchone()
         vec_count = 0
+        vec_type = "none"
         if _vec_available(self.conn):
             try:
                 vec_count = cursor.execute("SELECT COUNT(*) FROM vec_episodes").fetchone()[0]
+                vec_type = _effective_vec_type(self.conn)
             except Exception:
                 pass
-        return {"total": total, "last": last[0] if last else None, "vectors": vec_count}
+        return {"total": total, "last": last[0] if last else None, "vectors": vec_count, "vec_type": vec_type}
 
     # ------------------------------------------------------------------
     # Scratchpad
@@ -459,7 +647,6 @@ class BeamMemory:
         from mnemosyne.core.aaak import encode as aaak_encode
 
         cursor = self.conn.cursor()
-        # Find working memories older than TTL/2 that haven't been consolidated
         cutoff = (datetime.now() - timedelta(hours=WORKING_MEMORY_TTL_HOURS // 2)).isoformat()
         cursor.execute(f"""
             SELECT id, content, source, timestamp, importance, metadata_json
@@ -472,7 +659,6 @@ class BeamMemory:
         if not rows:
             return {"status": "no_op", "message": "No old working memories to consolidate"}
 
-        # Simple batch summarization: group by source, concatenate, compress
         grouped: Dict[str, List[Dict]] = {}
         for row in rows:
             grouped.setdefault(row["source"], []).append(dict(row))
@@ -480,10 +666,8 @@ class BeamMemory:
         consolidated_ids = []
         summaries_created = 0
         for source, items in grouped.items():
-            # Build a concise summary
             lines = [item["content"] for item in items]
             combined = " | ".join(lines)
-            # Compress with AAAK
             compressed = aaak_encode(combined)
             summary = f"[{source}] {compressed}"
             ids = [item["id"] for item in items]
@@ -495,7 +679,6 @@ class BeamMemory:
                     importance=0.6,
                     metadata={"original_count": len(items), "source": source}
                 )
-                # Remove consolidated working memories
                 placeholders = ",".join("?" * len(ids))
                 cursor.execute(f"DELETE FROM working_memory WHERE id IN ({placeholders})", ids)
                 self.conn.commit()
