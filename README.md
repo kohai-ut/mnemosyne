@@ -240,27 +240,24 @@ Use this to answer questions about the user and prior work.
 ### Option 1: Native Plugin (Recommended)
 
 ```bash
-# Clone anywhere you want
-git clone https://github.com/AxDSan/mnemosyne.git
+# Install directly via Hermes's built-in plugin manager
+hermes plugins install AxDSan/mnemosyne
 
-# Run the install script — it creates the correct symlinks and installs deps
-cd mnemosyne
-./scripts/install.sh
-
-# Restart Hermes gateway to load the plugin
+# Restart Hermes to load the plugin
 hermes gateway restart
 ```
 
-**What the install script does:**
-1. Creates a symlink at `~/.hermes/hermes-agent/plugins/memory/mnemosyne` (the actual location Hermes looks)
-2. Also symlinks to `~/.hermes/plugins/mnemosyne` for backwards compatibility
-3. Installs `mnemosyne-memory` into Hermes's Python venv
-4. Optionally installs `fastembed` for dense retrieval
-
-**Updating the plugin (local development):**
+**Or install from a local clone (for development):**
 ```bash
-# If you modify plugin.yaml or the tool definitions, reinstall:
-./scripts/install.sh --force
+git clone https://github.com/AxDSan/mnemosyne.git
+cd mnemosyne
+hermes plugins install . --force
+hermes gateway restart
+```
+
+**Updating the plugin:**
+```bash
+hermes plugins install AxDSan/mnemosyne --force
 hermes gateway restart
 ```
 
