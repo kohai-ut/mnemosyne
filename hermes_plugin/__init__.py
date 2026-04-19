@@ -45,6 +45,22 @@ def _get_memory():
 
 def register(ctx):
     """Register plugin tools and hooks with Hermes"""
+    
+    # Detect if Mnemosyne is already active as a MemoryProvider
+    # If so, skip general plugin registration to avoid double-tools and conflicting hooks
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        active_provider = cfg.get("memory", {}).get("provider")
+        if active_provider == "mnemosyne":
+            import logging
+            logging.getLogger(__name__).info(
+                "Mnemosyne general plugin skipped: already active as MemoryProvider"
+            )
+            return {"status": "skipped", "reason": "active_as_memory_provider"}
+    except Exception:
+        pass
+    
     from . import tools
     
     # Register tools
