@@ -9,9 +9,33 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
 
+## ⚡ Quick Start
+
+```bash
+# 1. Install Mnemosyne
+pip install mnemosyne-memory
+
+# 2. Connect to Hermes (one command)
+python -m mnemosyne.install
+
+# Done. Hermes now uses Mnemosyne as its memory provider.
+```
+
+Or use the install script:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/AxDSan/mnemosyne/main/deploy_hermes_provider.sh | bash
+```
+
+Verify:
+```bash
+hermes memory status
+hermes mnemosyne stats
+```
+
 ---
 
-## 📋 Table of Contents
+## 📧 Table of Contents
 
 - [🏛️ Built for Hermes Agent](#built-for-hermes-agent)
 - [🚀 What is New](#what-is-new--the-level-up)
@@ -280,47 +304,55 @@ Global memories are injected first, followed by session-specific context. Expire
 ---
 
 <a id="installation-for-hermes"></a>
-## 📦 Installation for Hermes
+## 📤 Installation
 
-### Option 1: Native Plugin (Recommended)
+### For Hermes Users (Recommended)
 
+**One-line install:**
 ```bash
-# Install directly via Hermes's built-in plugin manager
-hermes plugins install AxDSan/mnemosyne
-
-# Restart Hermes to load the plugin
-hermes gateway restart
+pip install mnemosyne-memory && python -m mnemosyne.install
 ```
 
-**Or install from a local clone (for development):**
+**Or step by step:**
+```bash
+# Install the package
+pip install mnemosyne-memory
+
+# Deploy the MemoryProvider into Hermes
+python -m mnemosyne.install
+
+# Verify
+hermes memory status
+```
+
+**Uninstall:**
+```bash
+python -m mnemosyne.install --uninstall
+```
+
+### Manual / Development Install
+
 ```bash
 git clone https://github.com/AxDSan/mnemosyne.git
 cd mnemosyne
-hermes plugins install . --force
-hermes gateway restart
+pip install -e .
+python -m mnemosyne.install
 ```
 
-**Updating the plugin:**
-```bash
-hermes plugins install AxDSan/mnemosyne --force
-hermes gateway restart
-```
-
-Without `fastembed`, Mnemosyne falls back to keyword-only retrieval (functional but not competitive on semantic benchmarks).
-
-### Optional: Auto-Log Tool Calls
-
-By default, Mnemosyne **does not** automatically save every `terminal`, `execute_code`, or `write_file` call to memory. If you want to opt into that behavior, set:
+### Optional Dependencies
 
 ```bash
-export MNEMOSYNE_LOG_TOOLS=1
+# For dense retrieval (recommended)
+pip install mnemosyne-memory[embeddings]
+
+# For local LLM consolidation
+pip install mnemosyne-memory[llm]
+
+# Everything
+pip install mnemosyne-memory[all]
 ```
 
-We disable this by default because it rapidly floods working memory with operational noise, making recall and context injection less useful.
-
-### Vector Compression (Optional but Powerful)
-
-Control how much RAM your episodic vectors consume:
+### Vector Compression
 
 ```bash
 # Maximum compression — millions of memories on a small VPS
@@ -331,19 +363,6 @@ export MNEMOSYNE_VEC_TYPE=int8
 
 # Default — maximum precision
 export MNEMOSYNE_VEC_TYPE=float32
-```
-
-### Option 2: pip (Standalone Use)
-
-```bash
-pip install mnemosyne-memory
-```
-
-For local LLM consolidation (optional):
-```bash
-pip install mnemosyne-memory[llm]
-# or manually:
-pip install ctransformers huggingface-hub
 ```
 
 ---
