@@ -26,7 +26,9 @@ from mnemosyne.core.beam import BeamMemory, init_beam, _get_connection as _beam_
 _thread_local = threading.local()
 
 # Default data directory
-DEFAULT_DATA_DIR = Path.home() / ".mnemosyne" / "data"
+# NOTE: On Fly.io and ephemeral VMs, only ~/.hermes is persisted.
+# This MUST match beam.py's DEFAULT_DATA_DIR to avoid split-brain.
+DEFAULT_DATA_DIR = Path.home() / ".hermes" / "mnemosyne" / "data"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "mnemosyne.db"
 
 # Allow override via environment
@@ -36,9 +38,9 @@ if os.environ.get("MNEMOSYNE_DATA_DIR"):
     DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "mnemosyne.db"
 
 
-def _get_connection(db_path: Path = None) -> sqlite3.Connection:
+def _get_connection(db_path = None) -> sqlite3.Connection:
     """Get thread-local database connection"""
-    path = db_path or DEFAULT_DB_PATH
+    path = Path(db_path) if db_path else DEFAULT_DB_PATH
     if not hasattr(_thread_local, 'conn') or _thread_local.conn is None or getattr(_thread_local, 'db_path', None) != str(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         _thread_local.conn = sqlite3.connect(str(path), check_same_thread=False)

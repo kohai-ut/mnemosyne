@@ -17,6 +17,7 @@ import sqlite3
 import json
 import hashlib
 import threading
+import math
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
@@ -51,6 +52,7 @@ WORKING_MEMORY_TTL_HOURS = int(os.environ.get("MNEMOSYNE_WM_TTL_HOURS", "24"))
 EPISODIC_RECALL_LIMIT = int(os.environ.get("MNEMOSYNE_EP_LIMIT", "50000"))
 SLEEP_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_SLEEP_BATCH", "5000"))
 SCRATCHPAD_MAX_ITEMS = int(os.environ.get("MNEMOSYNE_SP_MAX", "1000"))
+RECENCY_HALFLIFE_HOURS = float(os.environ.get("MNEMOSYNE_RECENCY_HALFLIFE", "168"))  # 1 week default
 
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
@@ -239,9 +241,39 @@ def init_beam(db_path: Path = None):
 
     conn.commit()
 
+    # --- Migration: recall tracking columns (v2.1) ---
+    _add_column_if_missing(conn, "working_memory", "recall_count", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "working_memory", "last_recalled", "TIMESTAMP DEFAULT NULL")
+    _add_column_if_missing(conn, "episodic_memory", "recall_count", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "episodic_memory", "last_recalled", "TIMESTAMP DEFAULT NULL")
+
 
 def _generate_id(content: str) -> str:
     return hashlib.sha256(f"{content}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_type: str):
+    """Safely add a column if it doesn't already exist (SQLite migration helper)."""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cursor.fetchall()}
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.commit()
+
+
+def _recency_decay(timestamp_str: str, halflife_hours: float = RECENCY_HALFLIFE_HOURS) -> float:
+    """Calculate recency decay factor. 1.0 = brand new, ~0.5 = one halflife old."""
+    if not timestamp_str:
+        return 0.5  # Unknown age = neutral
+    try:
+        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=None)
+        hours_old = max(0.0, (datetime.now() - ts).total_seconds() / 3600.0)
+        return math.exp(-hours_old / halflife_hours)
+    except Exception:
+        return 0.5
 
 
 def _vec_available(conn: sqlite3.Connection) -> bool:
@@ -361,9 +393,33 @@ class BeamMemory:
     # ------------------------------------------------------------------
     # Working Memory
     # ------------------------------------------------------------------
+    def _find_duplicate(self, content: str) -> Optional[str]:
+        """Check if exact same content already exists in working_memory for this session.
+        Returns the existing memory_id if found, else None."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT id FROM working_memory
+            WHERE session_id = ? AND content = ?
+            LIMIT 1
+        """, (self.session_id, content))
+        row = cursor.fetchone()
+        return row["id"] if row else None
+
     def remember(self, content: str, source: str = "conversation",
                  importance: float = 0.5, metadata: Dict = None) -> str:
-        """Store into working_memory."""
+        """Store into working_memory. Deduplicates exact content matches."""
+        # --- Deduplication: exact match ---
+        existing_id = self._find_duplicate(content)
+        if existing_id:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE working_memory
+                SET importance = MAX(importance, ?), timestamp = ?, source = ?
+                WHERE id = ? AND session_id = ?
+            """, (importance, datetime.now().isoformat(), source, existing_id, self.session_id))
+            self.conn.commit()
+            return existing_id
+
         memory_id = _generate_id(content)
         timestamp = datetime.now().isoformat()
         cursor = self.conn.cursor()
@@ -495,7 +551,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(wm_ids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled
                 FROM working_memory
                 WHERE id IN ({placeholders}) AND session_id = ?
             """, (*tuple(wm_ids), self.session_id))
@@ -504,7 +560,7 @@ class BeamMemory:
             # Fallback: fetch recent items and score in Python (old path)
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled
                 FROM working_memory
                 WHERE session_id = ?
                 ORDER BY timestamp DESC
@@ -527,7 +583,9 @@ class BeamMemory:
                 partial = sum(1 for w in query_words for cw in content_lower.split() if w in cw or cw in w)
                 relevance = (exact * 1.0 + partial * 0.3) / max(len(query_words), 1)
             if relevance > 0.05 or wm_ranks:
-                score = relevance * 0.35 + row["importance"] * 0.2
+                decay = _recency_decay(row["timestamp"])
+                base_score = relevance * 0.35 + row["importance"] * 0.2
+                score = base_score * (0.7 + 0.3 * decay)
                 results.append({
                     "id": row["id"],
                     "content": row["content"][:500],
@@ -538,7 +596,10 @@ class BeamMemory:
                     "keyword_score": round(relevance, 4),
                     "dense_score": 0.0,
                     "fts_score": round(relevance, 4) if wm_ranks else 0.0,
-                    "importance": row["importance"]
+                    "importance": row["importance"],
+                    "recall_count": row["recall_count"] or 0,
+                    "last_recalled": row["last_recalled"],
+                    "recency_decay": round(decay, 4)
                 })
 
         # ---- Episodic memory (vec + FTS5 hybrid) ----
@@ -566,7 +627,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(episodic_rowids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT rowid, id, content, source, timestamp, importance
+                SELECT rowid, id, content, source, timestamp, importance, recall_count, last_recalled
                 FROM episodic_memory
                 WHERE rowid IN ({placeholders}) AND session_id = ?
             """, (*tuple(episodic_rowids), self.session_id))
@@ -574,7 +635,9 @@ class BeamMemory:
                 rid = row["rowid"]
                 sim = vec_results.get(rid, 0.0)
                 fts = fts_results.get(rid, 0.0)
-                score = sim * 0.5 + fts * 0.3 + row["importance"] * 0.2
+                decay = _recency_decay(row["timestamp"])
+                base_score = sim * 0.5 + fts * 0.3 + row["importance"] * 0.2
+                score = base_score * (0.7 + 0.3 * decay)
                 results.append({
                     "id": row["id"],
                     "content": row["content"][:500],
@@ -585,11 +648,37 @@ class BeamMemory:
                     "keyword_score": 0.0,
                     "dense_score": round(sim, 4),
                     "fts_score": round(fts, 4),
-                    "importance": row["importance"]
+                    "importance": row["importance"],
+                    "recall_count": row["recall_count"] or 0,
+                    "last_recalled": row["last_recalled"],
+                    "recency_decay": round(decay, 4)
                 })
 
         results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
+        final_results = results[:top_k]
+
+        # --- Recall tracking: increment counts + set last_recalled ---
+        now_iso = datetime.now().isoformat()
+        wm_ids = [r["id"] for r in final_results if r.get("tier") == "working"]
+        em_ids = [r["id"] for r in final_results if r.get("tier") == "episodic"]
+        cursor = self.conn.cursor()
+        if wm_ids:
+            placeholders = ",".join("?" * len(wm_ids))
+            cursor.execute(f"""
+                UPDATE working_memory
+                SET recall_count = recall_count + 1, last_recalled = ?
+                WHERE id IN ({placeholders}) AND session_id = ?
+            """, (now_iso, *tuple(wm_ids), self.session_id))
+        if em_ids:
+            placeholders = ",".join("?" * len(em_ids))
+            cursor.execute(f"""
+                UPDATE episodic_memory
+                SET recall_count = recall_count + 1, last_recalled = ?
+                WHERE id IN ({placeholders}) AND session_id = ?
+            """, (now_iso, *tuple(em_ids), self.session_id))
+        self.conn.commit()
+
+        return final_results
 
     def get_episodic_stats(self) -> Dict:
         cursor = self.conn.cursor()
