@@ -11,6 +11,26 @@
 
 ---
 
+## 📋 Table of Contents
+
+- [🏛️ Built for Hermes Agent](#built-for-hermes-agent)
+- [🚀 What is New](#what-is-new--the-level-up)
+- [🔄 Upgrading from Earlier Versions](#upgrading-from-earlier-mnemosyne-versions)
+- [📊 Benchmarks](#benchmarks-mnemosyne-vs-the-field)
+- [⚡ Performance vs. Cloud](#performance-mnemosyne-vs-cloud-alternatives)
+- [🚀 BEAM Architecture Benchmarks](#beam-architecture-benchmarks-april-2026)
+- [🚀 Hermes Plugin Integration](#hermes-plugin-integration)
+- [📦 Installation](#installation-for-hermes)
+- [🔧 Usage](#usage-in-hermes)
+- [💻 CLI Commands](#cli-commands)
+- [🏗️ Architecture](#architecture)
+- [🛡️ Disaster Recovery](#disaster-recovery)
+- [📊 Comparison](#comparison-mnemosyne-vs-alternatives)
+- [🧪 Testing](#testing-with-hermes)
+- [🤝 Contributing](#contributing)
+
+---
+
 ## 🏛️ Built for Hermes Agent
 
 **Mnemosyne was purpose-built for the Hermes AI Agent framework** to provide native, zero-cloud memory that rivals cloud solutions without the latency, cost, or privacy concerns.
