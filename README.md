@@ -1,5 +1,7 @@
 # Mnemosyne
 
+![Mnemosyne](/assets/mnemosyne.jpg)
+
 > Native, zero-cloud memory for AI agents. SQLite-backed. Sub-millisecond. Fully private.
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
