@@ -25,6 +25,7 @@ def register_cli(subparser):
 
     mn_cmds.add_parser("stats", help="Show memory statistics")
     mn_cmds.add_parser("sleep", help="Run consolidation cycle")
+    mn_cmds.add_parser("version", help="Show Mnemosyne version")
 
     inspect_cmd = mn_cmds.add_parser("inspect", help="Search memories")
     inspect_cmd.add_argument("query", nargs="?", default="", help="Search query")
@@ -60,6 +61,10 @@ def mnemosyne_command(args):
         working = beam.get_working_stats()
         episodic = beam.get_episodic_stats()
         print(json.dumps({"working": working, "episodic": episodic}, indent=2))
+
+    elif cmd == "version":
+        from mnemosyne import __version__, __author__
+        print(f"Mnemosyne {__version__} by {__author__}")
 
     elif cmd == "sleep":
         beam.sleep()
