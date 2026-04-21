@@ -22,6 +22,15 @@ python -m pytest tests/ -v
 
 ## Code Contributions
 
+### Versioning
+
+Mnemosyne uses **Simple Versioning** (`MAJOR.MINOR`, no patch):
+
+- **MINOR** bumps after every iteration: bug fixes, features, docs, refactors.
+- **MAJOR** bumps only for significant new functionality (e.g., 1.0 → 2.0).
+
+`__version__` in `mnemosyne/__init__.py` is the single source of truth. `setup.py` reads from it automatically. If you open a PR that changes user-facing behavior, bump the version and add an entry to `CHANGELOG.md`.
+
 ### Principles
 
 Mnemosyne is intentionally minimal. Every addition is weighed against these principles:
@@ -37,6 +46,7 @@ Mnemosyne is intentionally minimal. Every addition is weighed against these prin
 2. **Keep it focused.** One PR per logical change.
 3. **Add tests.** If you fix a bug or add a feature, include a test in `tests/`.
 4. **Update the README** if user-facing behavior changes.
+5. **Bump the version** in `mnemosyne/__init__.py` and update `CHANGELOG.md`.
 
 ### Review Process
 

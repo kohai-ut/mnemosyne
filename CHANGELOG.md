@@ -8,16 +8,39 @@ given a version number **MAJOR.MINOR**, increment the:
 
 ---
 
-## 1.1
+## 1.5
+
+- Fix 6 critical bugs from issue #6 (stats, recall tracking, vector similarity, missing methods, hardcoded session_id)
+- Fix fastembed dependency in setup.py and README (was incorrectly listing sentence-transformers)
+- Official bug report issue template
+- Adopt simplified MAJOR.MINOR versioning
+
+## 1.4
+
+- Full README rewrite: professional, community-focused, benchmarks restored
+- CONTRIBUTING.md added
+- FluxSpeak branding scrubbed (author/metadata corrected)
+- Project image banner added
+
+## 1.3
 
 - Export / import memory for cross-machine migration
-- Official bug report issue template
-- Fix: `get_episodic_stats()` no longer filters by `session_id`
-- Fix: episodic recall tracking now updates `recall_count` for global memories
-- Fix: normalize sqlite-vec distances for int8/bit vectors (dense_score was always 0.0)
-- Fix: `Mnemosyne.remember()` now accepts `valid_until` and `scope`
-- Fix: added missing `Mnemosyne.invalidate()` method
-- Fix: dynamic `session_id` from `HERMES_SESSION_ID` env var in tools.py
+- CLI subcommands: `export`, `import`, `version`
+
+## 1.2
+
+- Mnemosyne as deployable MemoryProvider via Hermes plugin system
+- One-command installer (`python -m mnemosyne.install`)
+- CLI fix: `register_cli` correctly handles subparsers
+
+## 1.1
+
+- Dense retrieval via fastembed (bge-small-en-v1.5)
+- Temporal validity + global scope (`scope="global"`)
+- Recall tracking + recency decay scoring
+- Exact-match deduplication in working memory
+- Local LLM-based sleep consolidation (TinyLlama fallback)
+- BEAM scale limits for 1M+ token capacity
 
 ## 1.0
 
@@ -26,12 +49,8 @@ First major release. Production-ready.
 - BEAM architecture: working_memory, episodic_memory, scratchpad
 - Native vector search via sqlite-vec (HNSW-style)
 - FTS5 full-text hybrid search (50% vector + 30% FTS + 20% importance)
-- Dense retrieval via fastembed (bge-small-en-v1.5)
-- Automatic sleep/consolidation cycle
 - Temporal triples (time-aware knowledge graph)
 - AAAK context compression
 - Configurable vector compression: float32, int8, bit
-- Cross-session global memory (`scope="global"`)
-- Export/import for backup and migration
-- Hermes plugin integration with CLI subcommands
+- Hermes plugin integration
 - Sub-millisecond latency on CPU
