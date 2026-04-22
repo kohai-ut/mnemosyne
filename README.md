@@ -172,6 +172,37 @@ pip install ctransformers>=0.2.27 huggingface-hub>=0.20
 python -m mnemosyne.install --uninstall
 ```
 
+### Updating
+
+Mnemosyne is installed from source, so updating is a `git pull` away.
+
+**Option A (pip install -e .):**
+```bash
+cd mnemosyne
+git pull
+# Only re-run pip if setup.py changed (new deps, entry points, CLI commands):
+pip install -e .
+```
+
+**Option B (deploy script / symlink only):**
+```bash
+cd mnemosyne
+git pull
+# Nothing to reinstall — it's a live symlink
+```
+
+**Always restart Hermes** after updating so plugin changes take effect:
+```bash
+hermes gateway restart
+```
+
+**If the update includes database schema changes**, run the migration helper:
+```bash
+python scripts/migrate_from_legacy.py
+```
+
+See [UPDATING.md](UPDATING.md) for detailed troubleshooting and rollback instructions.
+
 ---
 
 ## Usage
