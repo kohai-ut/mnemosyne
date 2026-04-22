@@ -14,6 +14,10 @@ Mnemosyne is a local-first memory system for the [Hermes Agent](https://github.c
 
 ## Quick Start
 
+### Option A: Full install (recommended)
+
+For the CLI, Python API, and Hermes MemoryProvider:
+
 ```bash
 # 1. Clone and install
 git clone https://github.com/AxDSan/mnemosyne.git
@@ -38,11 +42,15 @@ hermes memory setup
 # → Select "mnemosyne" and press Enter
 ```
 
-Or use the install script:
+### Option B: Hermes MemoryProvider only (no pip needed)
+
+If you only need Mnemosyne as a Hermes memory backend and want to skip pip entirely:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/AxDSan/mnemosyne/main/deploy_hermes_provider.sh | bash
 ```
+
+This symlinks the provider into `~/.hermes/plugins/mnemosyne` and adds the repo to `sys.path` at runtime. No virtual environment required — works out of the box on Ubuntu 24.04.
 
 Verify:
 
@@ -143,6 +151,8 @@ cd mnemosyne
 pip install -e .
 python -m mnemosyne.install
 ```
+
+> ⚠️ **Ubuntu 24.04 / Debian 12 users:** If `pip install -e .` fails with `externally-managed-environment`, see the [Quick Start → Option A](#quick-start) note about using a virtual environment.
 
 ### Optional dependencies
 
