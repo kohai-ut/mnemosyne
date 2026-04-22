@@ -8,6 +8,11 @@ given a version number **MAJOR.MINOR**, increment the:
 
 ---
 
+## 1.8
+
+- Fix Hermes plugin CLI discovery: add `register(ctx)` to wire up `hermes mnemosyne stats|sleep|inspect|clear|export|import|version`
+- README: clarify deploy script vs pip install paths (Option A / Option B)
+
 ## 1.7
 
 - Fix subagent context writes polluting persistent memory (PR #8 by @woaim65)
