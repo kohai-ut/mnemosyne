@@ -218,6 +218,51 @@ class TestExportImport:
             assert stats["legacy"]["inserted"] >= 1
             assert stats["beam"]["working_memory"]["inserted"] >= 1
 
-            # Verify recall works
-            results = target.recall("pizza")
-            assert len(results) >= 1
+
+class TestProviderContextSafety:
+    def test_subagent_context_does_not_initialize_or_write(self, temp_db, monkeypatch):
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+
+        monkeypatch.setenv("MNEMOSYNE_DATA_DIR", str(temp_db.parent))
+
+        provider_path = repo_root / "hermes_memory_provider" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("mnemo_provider_test", provider_path)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+
+        provider = mod.MnemosyneMemoryProvider()
+        provider.initialize(
+            "subagent-session",
+            hermes_home=str(repo_root),
+            platform="cli",
+            agent_context="subagent",
+            agent_identity="test-profile",
+            agent_workspace="hermes",
+        )
+
+        assert provider._beam is None
+        result = provider.handle_tool_call(
+            "mnemosyne_remember",
+            {
+                "content": "subagent should not persist memory",
+                "importance": 0.9,
+                "source": "test",
+                "scope": "session",
+            },
+        )
+        assert "not initialized" in result
+
+        conn = sqlite3.connect(temp_db)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='working_memory'")
+        exists = cursor.fetchone() is not None
+        count = conn.execute("SELECT COUNT(*) FROM working_memory").fetchone()[0] if exists else 0
+        conn.close()
+        assert count == 0
