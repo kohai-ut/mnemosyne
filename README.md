@@ -19,7 +19,17 @@ Mnemosyne is a local-first memory system for the [Hermes Agent](https://github.c
 git clone https://github.com/AxDSan/mnemosyne.git
 cd mnemosyne
 pip install -e .
+```
 
+> ⚠️ **Ubuntu 24.04 / Debian 12 users:** If you get `error: externally-managed-environment`, your system Python is PEP 668-protected. Use a virtual environment:
+> ```bash
+> python3 -m venv .venv
+> source .venv/bin/activate
+> pip install -e .
+> ```
+> Make sure to activate the venv every time you run Hermes, or install Hermes itself inside the same venv.
+
+```bash
 # 2. Register with Hermes
 python -m mnemosyne.install
 
