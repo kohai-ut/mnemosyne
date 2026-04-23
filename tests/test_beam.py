@@ -272,6 +272,8 @@ class TestCrossSessionRecall:
     def test_global_memory_survives_consolidation_and_recall(self, temp_db, monkeypatch):
         """Regression for issue #7 Bug 2: global memories must survive sleep() and be recallable cross-session."""
         monkeypatch.setenv("MNEMOSYNE_DATA_DIR", str(temp_db.parent))
+        # Disable LLM summarization so original Chinese text is preserved in consolidation
+        monkeypatch.setattr("mnemosyne.core.local_llm.llm_available", lambda: False)
 
         # Session A: store global memories with backdated timestamps so sleep() consolidates them
         beam_a = BeamMemory(session_id="hermes_session-A", db_path=temp_db)
