@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/AxDSan/mnemosyne/actions/workflows/ci.yml/badge.svg)](https://github.com/AxDSan/mnemosyne/actions/workflows/ci.yml)
 
-Mnemosyne is a local-first memory system for the [Hermes Agent](https://github.com/AxDSan/hermes) framework. It stores conversations, preferences, and knowledge in SQLite with native vector search (sqlite-vec) and full-text search (FTS5) — no external databases, no API keys, no network calls.
+Mnemosyne is a local-first memory system for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) framework. It stores conversations, preferences, and knowledge in SQLite with native vector search (sqlite-vec) and full-text search (FTS5) — no external databases, no API keys, no network calls.
 
 ---
 
@@ -431,7 +431,7 @@ Copyright (c) 2026 Abdias J
 
 ## Acknowledgments
 
-- [Hermes Agent Framework](https://github.com/AxDSan/hermes) — The ecosystem Mnemosyne was built for
+- [Hermes Agent Framework](https://github.com/NousResearch/hermes-agent) — The ecosystem Mnemosyne was built for
 - [Honcho](https://github.com/plasticlabs/honcho) — For defining the stateful memory space
 - [Mempalace](https://github.com/thepersonalaicompany/mempalace) — For proving local-first memory can compete on benchmarks
 - [SQLite](https://sqlite.org/codeofethics.html) — The world's most deployed database
