@@ -22,7 +22,6 @@ given a version number **MAJOR.MINOR**, increment the:
 - **README alignment** — Fixed PyPI badge, VEC_TYPE default (`int8`), Python version (`3.9+`), documented optional REST API.
 - **Align TripleStore default DB** — Changed from `~/.mnemosyne` to `~/.hermes/mnemosyne/data` for consistency.
 - **Fix `_vec_type_cache` stale risk** — Removed unsafe `id(conn)` cache; queries `sqlite_master` each time.
-- **Add DevOps policy** — `DEVOPS.md` covers commit standards, release process, authorship, rollback, security.
 
 ## 1.10.1
 
