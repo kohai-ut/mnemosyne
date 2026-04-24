@@ -131,6 +131,18 @@ def register(ctx):
         handler=tools.mnemosyne_export
     )
     ctx.register_tool(
+        name="mnemosyne_update",
+        toolset="mnemosyne",
+        schema=tools.UPDATE_SCHEMA,
+        handler=tools.mnemosyne_update
+    )
+    ctx.register_tool(
+        name="mnemosyne_forget",
+        toolset="mnemosyne",
+        schema=tools.FORGET_SCHEMA,
+        handler=tools.mnemosyne_forget
+    )
+    ctx.register_tool(
         name="mnemosyne_import",
         toolset="mnemosyne",
         schema=tools.IMPORT_SCHEMA,

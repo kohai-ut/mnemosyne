@@ -183,6 +183,44 @@ EXPORT_SCHEMA = {
     }
 }
 
+UPDATE_SCHEMA = {
+    "name": "mnemosyne_update",
+    "description": "Update the content or importance of an existing memory by ID.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {
+                "type": "string",
+                "description": "ID of the memory to update"
+            },
+            "content": {
+                "type": "string",
+                "description": "New content for the memory (optional)"
+            },
+            "importance": {
+                "type": "number",
+                "description": "New importance from 0.0 to 1.0 (optional)"
+            }
+        },
+        "required": ["memory_id"]
+    }
+}
+
+FORGET_SCHEMA = {
+    "name": "mnemosyne_forget",
+    "description": "Permanently delete a memory by ID from working and legacy memory.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {
+                "type": "string",
+                "description": "ID of the memory to delete"
+            }
+        },
+        "required": ["memory_id"]
+    }
+}
+
 IMPORT_SCHEMA = {
     "name": "mnemosyne_import",
     "description": "Import Mnemosyne memories from a JSON file. Idempotent by default.",
@@ -374,6 +412,43 @@ def mnemosyne_export(args: dict, **kwargs) -> str:
         mem = _get_memory()
         result = mem.export_to_file(output_path)
         return json.dumps(result)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def mnemosyne_update(args: dict, **kwargs) -> str:
+    """Update an existing memory by ID"""
+    try:
+        memory_id = args.get("memory_id", "").strip()
+        if not memory_id:
+            return json.dumps({"error": "memory_id is required"})
+
+        content = args.get("content")
+        importance = args.get("importance")
+
+        mem = _get_memory()
+        ok = mem.update(memory_id, content=content, importance=importance)
+        return json.dumps({
+            "status": "updated" if ok else "not_found",
+            "memory_id": memory_id
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def mnemosyne_forget(args: dict, **kwargs) -> str:
+    """Permanently delete a memory by ID"""
+    try:
+        memory_id = args.get("memory_id", "").strip()
+        if not memory_id:
+            return json.dumps({"error": "memory_id is required"})
+
+        mem = _get_memory()
+        ok = mem.forget(memory_id)
+        return json.dumps({
+            "status": "deleted" if ok else "not_found",
+            "memory_id": memory_id
+        })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
