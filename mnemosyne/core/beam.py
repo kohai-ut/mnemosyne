@@ -294,6 +294,42 @@ def _vec_available(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _in_memory_vec_search(conn: sqlite3.Connection, query_embedding: np.ndarray, k: int = 20) -> List[Dict]:
+    """Fallback vector search using memory_embeddings table + numpy cosine similarity."""
+    cursor = conn.cursor()
+    # Join with episodic_memory (not memories) since that's where BEAM stores consolidated data
+    cursor.execute("""
+        SELECT em.rowid, me.memory_id, me.embedding_json
+        FROM memory_embeddings me
+        JOIN episodic_memory em ON me.memory_id = em.id
+        LIMIT 10000
+    """)
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+
+    query_norm = np.linalg.norm(query_embedding)
+    if query_norm == 0:
+        return []
+    query_unit = query_embedding / query_norm
+
+    results = []
+    for row in rows:
+        try:
+            vec = np.array(json.loads(row["embedding_json"]), dtype=np.float32)
+            vec_norm = np.linalg.norm(vec)
+            if vec_norm == 0:
+                continue
+            sim = float(np.dot(query_unit, vec / vec_norm))
+            # Convert similarity to distance-like metric (1 - sim) for consistent ranking
+            results.append({"rowid": row["rowid"], "distance": 1.0 - sim})
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x["distance"])
+    return results[:k]
+
+
 def _effective_vec_type(conn: sqlite3.Connection) -> str:
     """Re-detect the actual vector type used by vec_episodes."""
     if not _vec_available(conn):
@@ -593,8 +629,15 @@ class BeamMemory:
 
         if _embeddings.available():
             vec = _embeddings.embed([summary])
-            if vec is not None and _vec_available(self.conn):
-                _vec_insert(self.conn, rowid, vec[0].tolist())
+            if vec is not None:
+                if _vec_available(self.conn):
+                    _vec_insert(self.conn, rowid, vec[0].tolist())
+                else:
+                    # Fallback: store in memory_embeddings table for in-memory search
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model)
+                        VALUES (?, ?, ?)
+                    """, (memory_id, _embeddings.serialize(vec[0]), _embeddings._DEFAULT_MODEL))
 
         self.conn.commit()
         return memory_id
@@ -694,10 +737,14 @@ class BeamMemory:
         # ---- Episodic memory (vec + FTS5 hybrid) ----
         vec_results = {}
         max_distance = 0.0
-        if _embeddings.available() and _vec_available(self.conn):
+        if _embeddings.available():
             emb_result = _embeddings.embed_query(query)
             if emb_result is not None:
-                vec_rows = _vec_search(self.conn, emb_result.tolist(), k=max(top_k * 3, 20))
+                if _vec_available(self.conn):
+                    vec_rows = _vec_search(self.conn, emb_result.tolist(), k=max(top_k * 3, 20))
+                else:
+                    # Fallback: in-memory cosine similarity search
+                    vec_rows = _in_memory_vec_search(self.conn, emb_result, k=max(top_k * 3, 20))
                 if vec_rows:
                     max_distance = max(vr["distance"] for vr in vec_rows)
                     for vr in vec_rows:
