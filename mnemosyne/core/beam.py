@@ -239,6 +239,16 @@ def init_beam(db_path: Path = None):
         )
     """)
 
+    # --- memory_embeddings: fallback for environments without sqlite-vec ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS memory_embeddings (
+            memory_id TEXT PRIMARY KEY,
+            embedding_json TEXT NOT NULL,
+            model TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
 
     # --- Migration: recall tracking columns (v2.1) ---

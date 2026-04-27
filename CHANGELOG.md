@@ -8,6 +8,12 @@ given a version number **MAJOR.MINOR**, increment the:
 
 ---
 
+## 1.12.0
+
+- **Fix: embeddings generated but discarded when sqlite-vec is absent** — Previously, installing `mnemosyne-memory[embeddings]` without `sqlite-vec` produced identical behavior to the core install. Embeddings were generated during consolidation but thrown away because `_vec_available()` returned False. Now embeddings fall back to the `memory_embeddings` table, and `recall()` uses in-memory numpy cosine similarity when sqlite-vec is unavailable. Semantic search works with just `[embeddings]` installed. Closes #15.
+- **Add `_in_memory_vec_search()`** — Cosine similarity search via numpy on the `memory_embeddings` table. Used as fallback when sqlite-vec is absent. No new dependencies (numpy already required by fastembed).
+- **Docs fix:** `sqlite-vec` is now documented as an optional performance optimization (native C vector search in SQLite) rather than a hard requirement for semantic search.
+
 ## 1.11.0
 
 - **Fix BUG-1: Context overflow on consolidation** — `sleep()` now chunks memories to fit the LLM context window. `SLEEP_BATCH_SIZE=5000` no longer blindly passes 5000 memories to a 2048-token model. Per-source token-aware chunking with multi-pass consolidation (chunk summaries → second-pass summary).
