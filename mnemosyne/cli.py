@@ -535,6 +535,7 @@ def run_cli():
         print("  update <memory_id> <new_content>       - Update a memory")
         print("  delete <memory_id>                     - Delete a memory")
         print("  stats                                  - Show statistics")
+        print("  diagnose                               - Run PII-safe diagnostics")
         print("  server                                 - Run API server")
         return
     
@@ -599,7 +600,24 @@ def run_cli():
         print(f"\n  Sources:")
         for source, count in stats['sources'].items():
             print(f"    - {source}: {count}")
-    
+
+    elif command == "diagnose":
+        try:
+            from mnemosyne.diagnose import run_diagnostics
+            result = run_diagnostics()
+            print("\n🔍 Mnemosyne Diagnostics\n")
+            print(f"  Log file: {result['log_path']}")
+            print(f"  Checks passed: {result['checks_passed']}/{result['checks_total']}")
+            print(f"  Checks failed: {result['checks_failed']}/{result['checks_total']}")
+            if result['key_findings']:
+                print(f"\n  Key findings:")
+                for finding in result['key_findings']:
+                    print(f"    • {finding}")
+            else:
+                print(f"\n  No issues detected")
+        except Exception as e:
+            print(f"❌ Diagnostic failed: {e}")
+
     elif command == "server":
         run_server()
     

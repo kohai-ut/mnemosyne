@@ -241,6 +241,15 @@ IMPORT_SCHEMA = {
     }
 }
 
+DIAGNOSE_SCHEMA = {
+    "name": "mnemosyne_diagnose",
+    "description": "Run PII-safe diagnostics on Mnemosyne installation. Checks dependencies, database state, and vector search readiness. Writes a JSONL log file that can be shared for troubleshooting. Never includes memory content or API keys.",
+    "parameters": {
+        "type": "object",
+        "properties": {}
+    }
+}
+
 
 # Tool Handlers
 def mnemosyne_remember(args: dict, **kwargs) -> str:
@@ -467,5 +476,15 @@ def mnemosyne_import(args: dict, **kwargs) -> str:
             "status": "imported",
             "stats": stats
         })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def mnemosyne_diagnose(args: dict, **kwargs) -> str:
+    """Run PII-safe diagnostics and return summary"""
+    try:
+        from mnemosyne.diagnose import run_diagnostics
+        result = run_diagnostics()
+        return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})

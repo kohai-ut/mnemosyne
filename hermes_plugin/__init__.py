@@ -148,6 +148,12 @@ def register(ctx):
         schema=tools.IMPORT_SCHEMA,
         handler=tools.mnemosyne_import
     )
+    ctx.register_tool(
+        name="mnemosyne_diagnose",
+        toolset="mnemosyne",
+        schema=tools.DIAGNOSE_SCHEMA,
+        handler=tools.mnemosyne_diagnose
+    )
 
     # Register hooks for automatic context injection
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
