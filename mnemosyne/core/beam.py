@@ -280,6 +280,35 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, co
         conn.commit()
 
 
+def _normalize_weights(vec_weight: Optional[float], fts_weight: Optional[float],
+                       importance_weight: Optional[float]) -> tuple[float, float, float]:
+    """
+    Normalize hybrid scoring weights to sum to 1.0.
+
+    Falls back to env vars, then defaults:
+        vec_weight      -> MNEMOSYNE_VEC_WEIGHT      -> 0.5
+        fts_weight      -> MNEMOSYNE_FTS_WEIGHT      -> 0.3
+        importance_weight -> MNEMOSYNE_IMPORTANCE_WEIGHT -> 0.2
+
+    After normalization: vw + fw + iw == 1.0
+    """
+    vw = vec_weight if vec_weight is not None else float(os.environ.get("MNEMOSYNE_VEC_WEIGHT", "0.5"))
+    fw = fts_weight if fts_weight is not None else float(os.environ.get("MNEMOSYNE_FTS_WEIGHT", "0.3"))
+    iw = importance_weight if importance_weight is not None else float(os.environ.get("MNEMOSYNE_IMPORTANCE_WEIGHT", "0.2"))
+
+    # Clamp to non-negative
+    vw = max(0.0, vw)
+    fw = max(0.0, fw)
+    iw = max(0.0, iw)
+
+    total = vw + fw + iw
+    if total == 0.0:
+        # All zero = revert to defaults
+        return (0.5, 0.3, 0.2)
+
+    return (vw / total, fw / total, iw / total)
+
+
 def _recency_decay(timestamp_str: str, halflife_hours: float = RECENCY_HALFLIFE_HOURS) -> float:
     """Calculate recency decay factor. 1.0 = brand new, ~0.5 = one halflife old."""
     if not timestamp_str:
@@ -892,29 +921,44 @@ class BeamMemory:
                source: Optional[str] = None, topic: Optional[str] = None,
                temporal_weight: float = 0.0,
                query_time: Optional[Any] = None,
-               temporal_halflife: Optional[float] = None) -> List[Dict]:
+               temporal_halflife: Optional[float] = None,
+               vec_weight: float = None,
+               fts_weight: float = None,
+               importance_weight: float = None) -> List[Dict]:
         """
         Hybrid recall across working_memory + episodic_memory.
         Uses sqlite-vec + FTS5 for episodic, FTS5 for working.
         Falls back to recency-only for working memory if FTS5 unavailable.
-        
+
         Temporal filtering:
             from_date/to_date: ISO date strings (YYYY-MM-DD) to filter by timestamp.
             source: Filter by memory source (e.g., 'cron', 'user', 'conversation').
             topic: Filter by topic tag (stored in source field for now, pending dedicated column).
 
-        Temporal scoring (NEW in Phase 3):
+        Temporal scoring (Phase 3):
             temporal_weight: Float 0.0-1.0. Soft boost for memories near query_time.
                 0.0 = no temporal boost (default, backward compatible).
-                0.3 = moderate preference for memories near query_time.
             query_time: Target time for temporal scoring. None = now().
-                Accepts ISO string or datetime object.
             temporal_halflife: Hours for temporal decay. None = env var or 24h default.
-                Lower = sharper time preference. Higher = broader time window.
+
+        Configurable hybrid scoring (Phase 4):
+            vec_weight: Weight for vector (dense) similarity in episodic scoring.
+                None = use env var MNEMOSYNE_VEC_WEIGHT or default 0.5.
+            fts_weight: Weight for FTS5 text relevance in episodic scoring.
+                None = use env var MNEMOSYNE_FTS_WEIGHT or default 0.3.
+            importance_weight: Weight for importance score in all scoring.
+                None = use env var MNEMOSYNE_IMPORTANCE_WEIGHT or default 0.2.
+
+            The three episodic weights are automatically normalized to sum to 1.0.
+            Working memory uses a derived split: keyword gets (1 - importance_weight) * 0.6,
+            recency gets (1 - importance_weight) * 0.4.
         """
         results = []
         query_lower = query.lower()
         query_words = query_lower.split()
+
+        # ---- Configurable hybrid scoring setup (Phase 4) ----
+        vw, fw, iw = _normalize_weights(vec_weight, fts_weight, importance_weight)
 
         # ---- Temporal scoring setup ----
         parsed_query_time = _parse_query_time(query_time)
@@ -1008,8 +1052,12 @@ class BeamMemory:
                 relevance = (exact * 1.0 + partial * 0.3 + cross * 0.5 + full_match + char_overlap * 0.8) / max(len(query_words), 1)
             if relevance > 0.02 or wm_ranks:
                 decay = _recency_decay(row["timestamp"])
-                base_score = relevance * 0.35 + row["importance"] * 0.2
-                score = base_score * (0.7 + 0.3 * decay)
+                # Phase 4: configurable scoring for working memory
+                # keyword_share = (1 - importance_weight) * 0.6, recency_share = (1 - importance_weight) * 0.4
+                kw_share = (1.0 - iw) * 0.6
+                rc_share = (1.0 - iw) * 0.4
+                base_score = relevance * kw_share + row["importance"] * iw
+                score = base_score * (rc_share + (1.0 - rc_share) * decay)
                 # Temporal boost (Phase 3)
                 if temporal_weight > 0.0:
                     t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
@@ -1287,35 +1335,37 @@ class BeamMemory:
                 WHERE rowid IN ({placeholders})
                   AND {em_where}
             """, (*tuple(episodic_rowids), *em_params))
-            for row in cursor.fetchall():
-                rid = row["rowid"]
-                sim = vec_results.get(rid, 0.0)
-                fts = fts_results.get(rid, 0.0)
-                decay = _recency_decay(row["timestamp"])
-                base_score = sim * 0.5 + fts * 0.3 + row["importance"] * 0.2
-                score = base_score * (0.7 + 0.3 * decay)
-                # Temporal boost (Phase 3)
-                if temporal_weight > 0.0:
-                    t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
-                    score *= (1.0 + temporal_weight * t_boost)
-                results.append({
-                    "id": row["id"],
-                    "content": row["content"][:500],
-                    "source": row["source"],
-                    "timestamp": row["timestamp"],
-                    "tier": "episodic",
-                    "score": round(score, 4),
-                    "keyword_score": 0.0,
-                    "dense_score": round(sim, 4),
-                    "fts_score": round(fts, 4),
-                    "importance": row["importance"],
-                    "recall_count": row["recall_count"] or 0,
-                    "last_recalled": row["last_recalled"],
-                    "recency_decay": round(decay, 4),
-                    "scope": row["scope"] if "scope" in row.keys() else "session",
-                    "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
-                    "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None
-                })
+        for row in cursor.fetchall():
+            rid = row["rowid"]
+            sim = vec_results.get(rid, 0.0)
+            fts = fts_results.get(rid, 0.0)
+            decay = _recency_decay(row["timestamp"])
+            # Phase 4: configurable hybrid scoring for episodic memory
+            # vec_weight + fts_weight + importance_weight are normalized to sum to 1.0
+            base_score = sim * vw + fts * fw + row["importance"] * iw
+            score = base_score * (0.7 + 0.3 * decay)
+            # Temporal boost (Phase 3)
+            if temporal_weight > 0.0:
+                t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
+                score *= (1.0 + temporal_weight * t_boost)
+            results.append({
+                "id": row["id"],
+                "content": row["content"][:500],
+                "source": row["source"],
+                "timestamp": row["timestamp"],
+                "tier": "episodic",
+                "score": round(score, 4),
+                "keyword_score": 0.0,
+                "dense_score": round(sim, 4),
+                "fts_score": round(fts, 4),
+                "importance": row["importance"],
+                "recall_count": row["recall_count"] or 0,
+                "last_recalled": row["last_recalled"],
+                "recency_decay": round(decay, 4),
+                "scope": row["scope"] if "scope" in row.keys() else "session",
+                "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
+                "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None
+            })
 
         # Fallback: if no episodic matches from vec/FTS, scan recent episodic entries
         if not episodic_rowids:
@@ -1342,8 +1392,11 @@ class BeamMemory:
                 relevance = (exact * 1.0 + partial * 0.3 + cross * 0.5 + full_match + char_overlap * 0.8) / max(len(query_words), 1)
                 if relevance > 0.02:
                     decay = _recency_decay(row["timestamp"])
-                    base_score = relevance * 0.35 + row["importance"] * 0.2
-                    score = base_score * (0.7 + 0.3 * decay)
+                    # Phase 4: configurable scoring for episodic fallback
+                    kw_share = (1.0 - iw) * 0.6
+                    rc_share = (1.0 - iw) * 0.4
+                    base_score = relevance * kw_share + row["importance"] * iw
+                    score = base_score * (rc_share + (1.0 - rc_share) * decay)
                     # Temporal boost (Phase 3)
                     if temporal_weight > 0.0:
                         t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
