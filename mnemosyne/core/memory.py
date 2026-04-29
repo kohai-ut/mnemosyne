@@ -123,6 +123,105 @@ class Mnemosyne:
         init_db(self.db_path)
         self.beam = BeamMemory(session_id=session_id, db_path=self.db_path)
 
+        # Phase 8: Streaming + Patterns + Plugins (lazy init)
+        self._stream = None
+        self._compressor = None
+        self._pattern_detector = None
+        self._delta_sync = None
+        self._plugin_manager = None
+
+    # ─── Phase 8: Streaming ─────────────────────────────────────────
+
+    @property
+    def stream(self):
+        """Lazy-initialized memory event stream."""
+        if self._stream is None:
+            from mnemosyne.core.streaming import MemoryStream
+            self._stream = MemoryStream()
+        return self._stream
+
+    def enable_streaming(self) -> "Mnemosyne":
+        """Enable event streaming for this memory instance."""
+        _ = self.stream  # Force init
+        return self
+
+    # ─── Phase 8: Compression ───────────────────────────────────────
+
+    @property
+    def compressor(self):
+        """Lazy-initialized memory compressor."""
+        if self._compressor is None:
+            from mnemosyne.core.patterns import MemoryCompressor
+            self._compressor = MemoryCompressor()
+        return self._compressor
+
+    def compress(self, content: str, method: str = "auto"):
+        """Compress memory content. Returns (compressed, stats)."""
+        return self.compressor.compress(content, method=method)
+
+    def decompress(self, content: str, method: str = "dict") -> str:
+        """Decompress memory content."""
+        return self.compressor.decompress(content, method=method)
+
+    def compress_memories(self, memories: list, method: str = "auto"):
+        """Compress a batch of memories. Returns (compressed_memories, stats)."""
+        return self.compressor.compress_batch(memories, method=method)
+
+    # ─── Phase 8: Pattern Detection ─────────────────────────────────
+
+    @property
+    def patterns(self):
+        """Lazy-initialized pattern detector."""
+        if self._pattern_detector is None:
+            from mnemosyne.core.patterns import PatternDetector
+            self._pattern_detector = PatternDetector()
+        return self._pattern_detector
+
+    def detect_patterns(self, memories: list = None) -> list:
+        """Detect patterns in memories. Uses all working+episodic if none provided."""
+        if memories is None:
+            memories = self.get_all_memories()
+        return self.patterns.detect_all(memories)
+
+    def summarize_patterns(self, memories: list = None) -> dict:
+        """Generate a summary of detected patterns."""
+        if memories is None:
+            memories = self.get_all_memories()
+        return self.patterns.summarize_patterns(memories)
+
+    # ─── Phase 8: Delta Sync ──────────────────────────────────────
+
+    @property
+    def delta_sync(self):
+        """Lazy-initialized delta sync."""
+        if self._delta_sync is None:
+            from mnemosyne.core.streaming import DeltaSync
+            self._delta_sync = DeltaSync(self)
+        return self._delta_sync
+
+    def sync_to(self, peer_id: str, table: str = "working_memory") -> dict:
+        """Compute delta for a peer. Returns {peer_id, table, delta, count}."""
+        return self.delta_sync.sync_to(peer_id, table)
+
+    def sync_from(self, peer_id: str, delta: list, table: str = "working_memory") -> dict:
+        """Apply delta from a peer. Returns {peer_id, table, stats, checkpoint}."""
+        return self.delta_sync.sync_from(peer_id, delta, table)
+
+    # ─── Phase 8: Plugins ───────────────────────────────────────────
+
+    @property
+    def plugins(self):
+        """Lazy-initialized plugin manager."""
+        if self._plugin_manager is None:
+            from mnemosyne.core.plugins import PluginManager
+            self._plugin_manager = PluginManager()
+        return self._plugin_manager
+
+    @plugins.setter
+    def plugins(self, manager):
+        """Attach an external PluginManager."""
+        self._plugin_manager = manager
+
     def remember(self, content: str, source: str = "conversation",
                  importance: float = 0.5, metadata: Dict = None,
                  valid_until: str = None, scope: str = "session",
