@@ -51,6 +51,7 @@ Documentation = "https://github.com/AxDSan/mnemosyne/blob/main/docs/README.md"
 [project.scripts]
 mnemosyne-install = "mnemosyne.install:install"
 mnemosyne-uninstall = "mnemosyne.install:uninstall"
+mnemosyne = "mnemosyne.cli:run_cli"
 
 [tool.setuptools.packages.find]
 exclude = ["tests*", "benchmark*", "scripts*", "docs*", "assets*"]

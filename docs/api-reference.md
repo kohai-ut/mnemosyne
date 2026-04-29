@@ -1,297 +1,536 @@
-# API Reference
+# API Reference — Mnemosyne v2.0.0
 
-## Module-Level Functions
-
-The primary interface. Import directly from `mnemosyne`:
+## Quick Start
 
 ```python
-from mnemosyne import remember, recall, get_stats, forget, update, sleep
-from mnemosyne import get_context, scratchpad_write, scratchpad_read, scratchpad_clear
-```
+from mnemosyne import Mnemosyne
 
-### `remember(content, *, source, importance, metadata, valid_until, scope, extract_entities)`
+# Initialize (uses ~/.hermes/mnemosyne/data/ by default)
+mem = Mnemosyne()
 
-Store a memory. Writes to both BEAM working memory and the legacy table.
+# Store memories
+mem.remember("User prefers dark mode", importance=0.9)
 
-```python
-remember(
-    content="User prefers dark mode",
-    source="preference",        # default: "conversation"
-    importance=0.9,             # default: 0.5, range: 0.0–1.0
-    metadata={"ui": "v2"},     # default: None
-    valid_until="2026-12-31",  # default: None (never expires)
-    scope="global",            # "session" (default) or "global"
-    extract_entities=True,     # default: False — see Entity Sketching below
-)
-# → returns memory_id (str)
-```
+# Recall memories
+results = mem.recall("user preferences", top_k=5)
 
-**Parameters:**
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `content` | `str` | required | The memory text to store |
-| `source` | `str` | `"conversation"` | Origin label (e.g. "preference", "credential") |
-| `importance` | `float` | `0.5` | Priority weight (0.0–1.0). Affects hybrid ranking. |
-| `metadata` | `dict` | `None` | Arbitrary JSON-serializable metadata |
-| `valid_until` | `str` | `None` | ISO 8601 datetime. Memory expires after this time. |
-| `scope` | `str` | `"session"` | `"session"` = current session only, `"global"` = all sessions |
-| `extract_entities` | `bool` | `False` | Extract entities and store as triples for fuzzy recall |
-
----
-
-### `recall(query, *, top_k)`
-
-Search memories using hybrid retrieval (vector + FTS5 + importance).
-
-```python
-results = recall("editor preferences", top_k=5)
-for r in results:
-    print(r["content"], r["score"])
-```
-
-**Parameters:**
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `query` | `str` | required | Search query text |
-| `top_k` | `int` | `5` | Number of results to return |
-
-**Returns:** `List[Dict]` — each dict contains `content`, `score`, `source`, `importance`, and other metadata.
-
----
-
-### `forget(memory_id)`
-
-Delete a memory by ID. Removes from both legacy and BEAM working memory.
-
-```python
-forget("a1b2c3d4e5f67890")
-# → returns True if deleted, False if not found
+# Get stats
+stats = mem.get_stats()
 ```
 
 ---
 
-### `update(memory_id, *, content, importance)`
-
-Update an existing memory's content or importance.
+## Module-Level Convenience Functions
 
 ```python
-update("a1b2c3d4e5f67890", content="Updated preference", importance=0.7)
-# → returns True if updated, False if not found
+from mnemosyne import remember, recall, get_stats, forget, update, get_context
 ```
 
----
+These functions create a default `Mnemosyne` instance and delegate to it.
 
-### `get_stats()`
-
-Return memory system statistics.
-
-```python
-stats = get_stats()
-# {
-#   "total_memories": 42,
-#   "total_sessions": 3,
-#   "sources": {"preference": 10, "conversation": 32},
-#   "mode": "beam",
-#   "beam": {
-#     "working_memory": {"count": 15, ...},
-#     "episodic_memory": {"count": 8, ...}
-#   }
-# }
-```
-
----
-
-### `sleep(dry_run=False)`
-
-Run the consolidation sleep cycle. Moves stale working memories into episodic memory via summarization.
-
-```python
-result = sleep()
-# {"consolidated": 12, "method": "llm", "duration_ms": 340}
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `dry_run` | `bool` | `False` | If True, preview what would be consolidated without making changes |
-
----
-
-### `get_context(limit)`
-
-Get recent memories from working memory for context injection.
-
-```python
-context = get_context(limit=10)
-```
-
----
-
-### Scratchpad Functions
-
-```python
-scratchpad_write("TODO: fix auth bug")    # → returns entry ID
-entries = scratchpad_read()                # → List[Dict]
-scratchpad_clear()                         # clears all entries
-```
+| Function | Signature | Description |
+|---|---|---|
+| `remember()` | `(content, source="conversation", importance=0.5, **kwargs) -> str` | Store a memory, returns memory ID |
+| `recall()` | `(query, top_k=5, **kwargs) -> list` | Search memories |
+| `get_stats()` | `() -> dict` | Memory statistics |
+| `forget()` | `(memory_id) -> bool` | Delete a memory |
+| `update()` | `(memory_id, **kwargs) -> bool` | Update a memory |
+| `get_context()` | `(query, top_k=5) -> str` | Get formatted context string |
 
 ---
 
 ## Mnemosyne Class
 
-For multi-session or custom database path usage:
+**Module:** `mnemosyne.core.memory`
 
 ```python
-from mnemosyne import Mnemosyne
+from mnemosyne.core.memory import Mnemosyne
 
-m = Mnemosyne(session_id="project-alpha", db_path="/path/to/custom.db")
-m.remember("Project uses React 19", source="tech_stack", importance=0.8)
-results = m.recall("frontend framework", top_k=3)
-m.sleep()
+# Default instance
+mem = Mnemosyne()
+
+# With custom data directory
+mem = Mnemosyne(data_dir="/path/to/data")
+
+# With memory bank
+mem = Mnemosyne(bank="work")
+
+# With session ID
+mem = Mnemosyne(session_id="my-agent-session")
 ```
 
 ### Constructor
 
 ```python
-Mnemosyne(session_id="default", db_path=None)
+Mnemosyne(
+    data_dir: str = None,        # Custom data directory (default: ~/.hermes/mnemosyne/data/)
+    session_id: str = None,      # Session identifier (default: auto-generated UUID)
+    bank: str = None             # Memory bank name for isolation
+)
 ```
 
-### Methods
+### `remember()`
 
-| Method | Signature | Description |
-|---|---|---|
-| `remember` | `(content, source, importance, metadata, valid_until, scope, extract_entities) → str` | Store a memory |
-| `recall` | `(query, top_k=5) → List[Dict]` | Search memories |
-| `get_context` | `(limit=10) → List[Dict]` | Get recent working memory entries |
-| `get_stats` | `() → Dict` | Get statistics |
-| `forget` | `(memory_id) → bool` | Delete a memory |
-| `update` | `(memory_id, content, importance) → bool` | Update a memory |
-| `invalidate` | `(memory_id, replacement_id=None) → bool` | Mark a memory as superseded |
-| `sleep` | `(dry_run=False) → Dict` | Run consolidation |
-| `scratchpad_write` | `(content) → str` | Write to scratchpad |
-| `scratchpad_read` | `() → List[Dict]` | Read scratchpad |
-| `scratchpad_clear` | `() → None` | Clear scratchpad |
-| `consolidation_log` | `(limit=10) → List[Dict]` | View consolidation history |
-| `export_to_file` | `(output_path) → Dict` | Export all data to JSON |
-| `import_from_file` | `(input_path, force=False) → Dict` | Import data from JSON |
+Store a memory. Returns the memory ID.
+
+```python
+memory_id = mem.remember(
+    content: str,                      # The text to remember
+    source: str = "conversation",      # Origin: "conversation", "document", "system"
+    importance: float = 0.5,           # 0.0–1.0 relevance score
+    metadata: dict = None,             # Optional additional fields
+    valid_until: str = None,           # ISO timestamp when this memory expires
+    scope: str = "session",            # "session" or "global"
+    extract_entities: bool = False,    # Extract entity mentions as triples
+    extract: bool = False              # Extract structured facts via LLM
+)
+```
+
+**Examples:**
+
+```python
+# Basic storage
+mid = mem.remember("User prefers dark mode", importance=0.9)
+
+# With entity extraction
+mid = mem.remember("Abdias founded Mnemosyne in New York",
+                    extract_entities=True)
+
+# With fact extraction (requires LLM)
+mid = mem.remember("The project deadline is June 15th",
+                    extract=True, importance=0.8)
+
+# Session-scoped (auto-evicted after TTL)
+mid = mem.remember("Current task: fixing bug #42",
+                    scope="session", source="system")
+
+# Global (persists across sessions)
+mid = mem.remember("User's timezone is EST",
+                    scope="global")
+```
+
+### `recall()`
+
+Search memories using hybrid vector + FTS + importance scoring.
+
+```python
+results = mem.recall(
+    query: str,                           # Search query
+    top_k: int = 5,                       # Number of results
+    source: str = None,                   # Filter by source
+    threshold: float = 0.0,               # Minimum score threshold
+    scope: str = None,                    # Filter by scope
+    temporal_weight: float = 0.0,         # 0.0–1.0, boosts recent memories
+    query_time = None,                    # datetime or ISO string for temporal calculation
+    temporal_halflife: float = None,      # Hours for decay (default: 24)
+    vec_weight: float = None,             # Override vector scoring weight
+    fts_weight: float = None,             # Override FTS scoring weight
+    importance_weight: float = None       # Override importance weight
+)
+```
+
+Returns a list of dicts with keys: `id`, `content`, `score`, `source`, `timestamp`, `importance`, `scope`, `metadata`.
+
+**Examples:**
+
+```python
+# Basic recall
+results = mem.recall("user preferences")
+
+# Temporal boost — prefer recent memories
+results = mem.recall("current task", temporal_weight=0.5)
+
+# Custom scoring weights
+results = mem.recall("python code",
+    vec_weight=0.7, fts_weight=0.2, importance_weight=0.1)
+
+# Filter by source
+results = mem.recall("meeting notes", source="document")
+```
+
+### `update()`
+
+Update an existing memory.
+
+```python
+success = mem.update(
+    memory_id: str,
+    content: str = None,
+    importance: float = None,
+    metadata: dict = None
+)
+```
+
+### `forget()`
+
+Delete a memory by ID.
+
+```python
+success = mem.forget(memory_id: str)
+```
+
+### `sleep()`
+
+Run BEAM consolidation cycle — moves working memory to episodic storage.
+
+```python
+stats = mem.sleep()
+# Returns dict with consolidation statistics
+```
+
+### `get_stats()`
+
+Get memory statistics.
+
+```python
+stats = mem.get_stats()
+# Returns dict with counts per tier, session info, etc.
+```
+
+### `get_context()`
+
+Get a formatted context string for LLM injection.
+
+```python
+context = mem.get_context(query="recent tasks", top_k=5)
+# Returns formatted string ready for prompt injection
+```
+
+### `export_to_file()` / `import_from_file()`
+
+Portable export/import for backup and migration.
+
+```python
+mem.export_to_file("backup.json")
+mem.import_from_file("backup.json")
+```
+
+### v2 Properties (lazy-initialized)
+
+```python
+mem.stream           # MemoryStream — event stream
+mem.compressor       # MemoryCompressor — compress/decompress
+mem.patterns         # PatternDetector — temporal/content patterns
+mem.delta_sync       # DeltaSync — incremental sync
+mem.plugin_manager   # PluginManager — plugin lifecycle
+```
 
 ---
 
 ## BeamMemory Class
 
-Direct access to the BEAM tier. Useful for advanced use cases:
+**Module:** `mnemosyne.core.beam`
+
+The BEAM (Bilevel Episodic-Associative Memory) engine. Usually accessed through `Mnemosyne`, but can be used directly.
 
 ```python
 from mnemosyne.core.beam import BeamMemory
 
-beam = BeamMemory(session_id="my_session")
-
-# Working memory
-beam.remember("Important context", importance=0.9)
-
-# Episodic memory (manual insert)
-beam.consolidate_to_episodic(
-    summary="User likes Neovim",
-    source_wm_ids=["wm1"],
-    importance=0.8
+beam = BeamMemory(
+    session_id: str = "default",
+    db_path: Path = None
 )
+```
 
-# Search across tiers
-results = beam.recall("editor preferences", top_k=5)
+### Key Methods
 
-# Stats
-wm_stats = beam.get_working_stats()
-ep_stats = beam.get_episodic_stats()
+| Method | Description |
+|---|---|
+| `remember(content, **kwargs) -> str` | Store to working memory |
+| `recall(query, **kwargs) -> list` | Hybrid search across all tiers |
+| `sleep() -> dict` | Consolidate working → episodic |
+| `invalidate(memory_id, replacement_id=None) -> bool` | Mark memory as superseded |
+| `scratchpad_write(key, value) -> str` | Write to scratchpad |
+| `scratchpad_read(key) -> str` | Read from scratchpad |
+| `scratchpad_clear() -> int` | Clear scratchpad |
+
+---
+
+## Memory Banks
+
+**Module:** `mnemosyne.core.banks`
+
+```python
+from mnemosyne.core.banks import BankManager
+
+manager = BankManager(data_dir="~/.hermes/mnemosyne/data")
+
+# Create a bank
+manager.create_bank("work")
+
+# List banks
+banks = manager.list_banks()
+
+# Check if bank exists
+exists = manager.bank_exists("work")
+
+# Get bank stats
+stats = manager.get_bank_stats("work")
+
+# Rename a bank
+manager.rename_bank("work", "work-v2")
+
+# Delete a bank
+manager.delete_bank("work")
 ```
 
 ---
 
-## TripleStore Class
+## Entity Extraction
 
-Temporal knowledge graph:
+**Module:** `mnemosyne.core.entities`
+
+```python
+from mnemosyne.core.entities import (
+    extract_entities_regex,
+    levenshtein_distance,
+    find_similar_entities
+)
+
+# Extract entities from text
+entities = extract_entities_regex("Abdias founded Mnemosyne in New York")
+# Returns: ["Abdias", "Mnemosyne", "New York"]
+
+# Fuzzy match
+distance = levenshtein_distance("Abdias", "Abdias J")
+
+# Find similar entities in a list
+matches = find_similar_entities("Abdias", ["Abdias J", "Python", "New York"], threshold=0.7)
+```
+
+---
+
+## Fact Extraction
+
+**Module:** `mnemosyne.core.extraction`
+
+```python
+from mnemosyne.core.extraction import extract_facts, extract_facts_safe
+
+# Extract facts (may raise if no LLM available)
+facts = extract_facts("Mnemosyne uses SQLite for storage and fastembed for embeddings.")
+# Returns: list of fact strings
+
+# Safe wrapper (never raises, returns empty list on failure)
+facts = extract_facts_safe("Some text to extract facts from")
+```
+
+**Fallback chain:** Remote OpenAI API → Local ctransformers GGUF → Skip (returns [])
+
+---
+
+## Streaming & Delta Sync
+
+**Module:** `mnemosyne.core.streaming`
+
+### MemoryStream
+
+```python
+from mnemosyne.core.streaming import MemoryStream
+
+stream = MemoryStream()
+
+# Push events
+stream.push("remember", {"id": "abc", "content": "test"})
+
+# Pull via callback
+stream.on_event(lambda event: print(event))
+
+# Pull via iterator
+for event in stream:
+    process(event)
+```
+
+### DeltaSync
+
+```python
+from mnemosyne.core.streaming import DeltaSync
+
+sync = DeltaSync(mnemosyne_instance)
+
+# Compute changes since last checkpoint
+delta = sync.compute_delta()
+
+# Apply delta to another instance
+sync.apply_delta(delta)
+
+# Full bidirectional sync
+sync.sync_to(other_mnemosyne)
+sync.sync_from(other_mnemosyne)
+```
+
+---
+
+## Pattern Detection & Compression
+
+**Module:** `mnemosyne.core.patterns`
+
+### PatternDetector
+
+```python
+from mnemosyne.core.patterns import PatternDetector
+
+detector = PatternDetector()
+
+# Detect temporal patterns (hour-of-day, day-of-week)
+temporal = detector.detect_temporal_patterns(memories)
+
+# Detect content patterns (keyword frequency, co-occurrence)
+content = detector.detect_content_patterns(memories)
+
+# Detect sequence patterns
+sequences = detector.detect_sequence_patterns(memories)
+```
+
+### MemoryCompressor
+
+```python
+from mnemosyne.core.patterns import MemoryCompressor
+
+compressor = MemoryCompressor()
+
+# Compress memories
+compressed = compressor.compress(memories)
+
+# Decompress
+decompressed = compressor.decompress(compressed)
+
+# Batch compress
+batch = compressor.compress_batch(memory_list)
+```
+
+---
+
+## Plugin System
+
+**Module:** `mnemosyne.core.plugins`
+
+### Creating a Plugin
+
+```python
+from mnemosyne.core.plugins import MnemosynePlugin
+
+class MyPlugin(MnemosynePlugin):
+    name = "my-plugin"
+    
+    def on_remember(self, memory_id, content, **kwargs):
+        """Called after a memory is stored."""
+        pass
+    
+    def on_recall(self, query, results, **kwargs):
+        """Called after recall. Can modify results."""
+        return results
+    
+    def on_consolidate(self, count, **kwargs):
+        """Called after sleep() consolidation."""
+        pass
+    
+    def on_invalidate(self, memory_id, **kwargs):
+        """Called after a memory is invalidated."""
+        pass
+```
+
+### PluginManager
+
+```python
+from mnemosyne.core.plugins import PluginManager
+
+pm = PluginManager()
+
+# Register a plugin
+pm.register(MyPlugin())
+
+# Load from directory (auto-discovers .py files)
+pm.discover("~/.hermes/mnemosyne/plugins/")
+
+# Unregister
+pm.unregister("my-plugin")
+
+# List loaded plugins
+plugins = pm.list_plugins()
+```
+
+---
+
+## TripleStore (Knowledge Graph)
+
+**Module:** `mnemosyne.core.triples`
 
 ```python
 from mnemosyne.core.triples import TripleStore
 
-kg = TripleStore()
+store = TripleStore(db_path)
 
-# Add a triple (auto-invalidates previous (subject, predicate) pair)
-triple_id = kg.add(
-    subject="Maya",
-    predicate="assigned_to",
-    object="auth-migration",
-    valid_from="2026-01-15",       # default: today
-    source="project_manager",       # default: "inferred"
-    confidence=0.95                 # default: 1.0
-)
+# Add a triple
+store.add_triple("user_123", "prefers", "dark_mode")
 
 # Query triples
-results = kg.query(subject="Maya", as_of="2026-02-01")
+results = store.query_triples(subject="user_123")
 
-# Invalidate a triple
-kg.invalidate(triple_id)
-
-# Export all triples
-all_triples = kg.export_all()
+# Get all triples for an entity
+triples = store.get_triples_for_subject("memory_id_abc")
 ```
 
-### Methods
+---
 
-| Method | Description |
+## MCP Server
+
+**Module:** `mnemosyne.mcp_server`
+
+```bash
+# stdio transport (for Claude Desktop, etc.)
+mnemosyne mcp
+
+# SSE transport (for web clients)
+mnemosyne mcp --transport sse --port 8080
+
+# Scoped to a specific bank
+mnemosyne mcp --bank project_a
+```
+
+### MCP Tools
+
+| Tool | Description |
 |---|---|
-| `add(subject, predicate, object, valid_from, source, confidence) → int` | Add a temporal triple |
-| `query(subject, predicate, object, as_of) → List[Dict]` | Query triples, optionally at a point in time |
-| `query_by_predicate(predicate, object, subject) → List[Dict]` | Query triples by predicate (entity sketching helper) |
-| `get_distinct_objects(predicate) → List[str]` | Get all distinct object values for a predicate |
-| `invalidate(triple_id) → bool` | Mark a triple as no longer valid |
-| `export_all() → List[Dict]` | Export all triples |
+| `mnemosyne_remember` | Store a memory |
+| `mnemosyne_recall` | Search memories |
+| `mnemosyne_sleep` | Run consolidation |
+| `mnemosyne_scratchpad_read` | Read scratchpad |
+| `mnemosyne_scratchpad_write` | Write to scratchpad |
+| `mnemosyne_get_stats` | Get memory statistics |
 
 ---
 
-## Entity Sketching
+## CLI
 
-Lightweight entity extraction and fuzzy matching without heavy NLP dependencies.
-
-```python
-from mnemosyne.core.entities import extract_entities_regex, find_similar_entities
-
-# Extract entities from text
-entities = extract_entities_regex("Abdias and Maya work on Mnemosyne in New York.")
-# → ['Abdias', 'Maya', 'Mnemosyne', 'New York']
-
-# Find similar entities in a known list
-known = ["Abdias", "Abdias J.", "Maya", "Mnemosyne"]
-similar = find_similar_entities("Abdias Moya", known, threshold=0.8)
-# → [('Abdias', 0.9), ('Abdias J.', 0.85)]
+```bash
+mnemosyne store "User prefers dark mode" --importance 0.9
+mnemosyne recall "user preferences" --top-k 10
+mnemosyne update <memory_id> --content "Updated content"
+mnemosyne delete <memory_id>
+mnemosyne stats
+mnemosyne sleep
+mnemosyne export backup.json
+mnemosyne import backup.json
+mnemosyne bank list
+mnemosyne bank create work
+mnemosyne bank delete work
+mnemosyne mcp
+mnemosyne diagnose
 ```
 
-### Functions
+---
 
-| Function | Signature | Description |
+## Environment Variables
+
+| Variable | Default | Description |
 |---|---|---|
-| `extract_entities_regex` | `(text: str) → List[str]` | Extract entities using regex patterns |
-| `find_similar_entities` | `(entity, known_entities, threshold=0.8) → List[Tuple[str, float]]` | Fuzzy match entity against known list |
-| `similarity` | `(s1: str, s2: str) → float` | Entity-aware similarity (1.0 = identical) |
-| `levenshtein_distance` | `(s1: str, s2: str) → int` | Pure Python edit distance |
-
-### Usage with `remember()`
-
-Enable entity extraction on a per-memory basis:
-
-```python
-from mnemosyne import remember, recall
-
-# Store with entity extraction
-remember("Abdias presented at PyCon 2025", extract_entities=True)
-
-# Recall will include entity matches in results
-results = recall("Abdias")
-# Results tagged with entity_match=True for direct entity hits
-```
-
-**Performance:** Entity extraction adds ~0.01ms per call. Triple storage adds ~1ms per entity. Total overhead for a typical memory with 4 entities: ~5ms.
-
-**Storage format:** Entities stored as triples: `(memory_id, "mentions", "Entity Name")`.
+| `MNEMOSYNE_DATA_DIR` | `~/.hermes/mnemosyne/data/` | Root data directory |
+| `MNEMOSYNE_VEC_TYPE` | `int8` | Vector storage type: `bit` (48 bytes), `int8` (384 bytes), `float32` (1536 bytes) |
+| `MNEMOSYNE_SESSION_ID` | Auto UUID | Default session identifier |
+| `MNEMOSYNE_TEMPORAL_HALFLIFE_HOURS` | `24` | Default temporal decay halflife |
+| `FASTEMBED_CACHE_PATH` | `~/.hermes/cache/fastembed` | FastEmbed model cache directory |
 
 ---
+
+*API reference generated from source code. Every method and parameter verified against actual implementation.*

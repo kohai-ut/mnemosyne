@@ -1,138 +1,93 @@
 # Changelog
 
-Mnemosyne uses [Simple Versioning](https://gist.github.com/jonlow/6f7610566408a8efaa4a):
-given a version number **MAJOR.MINOR**, increment the:
+All notable changes to this project will be documented in this file.
 
-- **MINOR** after every iteration of development, testing, and quality assurance.
-- **MAJOR** for the first production release (1.0) or for significant new functionality (2.0, 3.0, etc.).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.0.0] — 2026-04-29
+
+### Added
+
+**Phase 1: Entity Sketching**
+- Regex-based entity extraction (`@mentions`, `#hashtags`, quoted phrases, capitalized sequences)
+- Pure-Python Levenshtein distance with O(min) space optimization
+- Fuzzy entity matching with prefix/substring bonuses and configurable threshold
+- `extract_entities=True` parameter on `remember()` — backward compatible, default False
+
+**Phase 2: Structured Fact Extraction**
+- LLM-driven fact extraction via `extract_facts()` and `extract_facts_safe()`
+- Graceful fallback chain: remote OpenAI-compatible API → local ctransformers GGUF → skip
+- Fact parsing with numbering/bullet cleanup, length filter, cap at 5 facts
+
+**Phase 3: Temporal Recall**
+- Exponential decay temporal scoring: `exp(-hours_delta / halflife)`
+- `temporal_weight`, `query_time`, `temporal_halflife` parameters on `recall()`
+- Environment variable `MNEMOSYNE_TEMPORAL_HALFLIFE_HOURS` for global default
+- Temporal boost applied across all recall tiers (working, episodic, entity, fact)
+
+**Phase 4: Configurable Hybrid Scoring**
+- User-tunable scoring weights: `vec_weight`, `fts_weight`, `importance_weight`
+- `_normalize_weights()` with env var fallback and sensible defaults (50/30/20)
+- Per-query weight overrides without global state mutation
+
+**Phase 5: Memory Banks**
+- `BankManager` class for named namespace isolation
+- Per-bank SQLite files under `banks/<name>/mnemosyne.db`
+- Bank operations: create, delete, list, rename, exists check, stats
+- `Mnemosyne(bank="work")` constructor parameter
+- Bank name validation (alphanumeric + hyphens/underscores, max 64 chars)
+
+**Phase 6: MCP Server**
+- Model Context Protocol server with 6 tools
+- stdio transport (Claude Desktop, etc.) and SSE transport (web clients)
+- Per-bank instance caching
+- CLI entry: `mnemosyne mcp`
+
+**Phase 7: Hermes Agent Integration**
+- 15 Hermes tools: remember, recall, stats, triple_add, triple_query, sleep, scratchpad_write/read/clear, invalidate, export, update, forget, import, diagnose
+- 3 lifecycle hooks: `pre_llm_call` (context injection), `on_session_start`, `post_tool_call`
+- AAAK compression for context injection
+- Session-aware memory instances
+
+**Phase 8: v2 Differentiation**
+- `MemoryStream` — push (callbacks) and pull (iterator) event stream, thread-safe
+- `DeltaSync` — checkpoint-based incremental synchronization between instances
+- `MemoryCompressor` — dictionary-based, RLE, and semantic compression
+- `PatternDetector` — temporal (hour/weekday), content (keyword, co-occurrence), sequence patterns
+- `MnemosynePlugin` ABC with 4 lifecycle hooks
+- `PluginManager` with auto-discovery from `~/.hermes/mnemosyne/plugins/`
+- 3 built-in plugins: `LoggingPlugin`, `MetricsPlugin`, `FilterPlugin`
+
+### Changed
+
+- **CLI rewritten** — all commands now use v2 `Mnemosyne`/`BeamMemory` instead of stale v1 `MnemosyneCore`
+- **SQLite WAL mode** — both `memory.py` and `beam.py` now use WAL journal mode with 5s busy timeout for better concurrency
+- **FastEmbed cache** — model cache persists at `~/.hermes/cache/fastembed` instead of ephemeral `/tmp`
+- **Legacy dual-write** — uses `INSERT OR REPLACE` for dedup safety
+
+### Fixed
+
+- `cli.py` DATA_DIR hardcoded to stale v1 path — now uses `MNEMOSYNE_DATA_DIR` env var
+- Duplicate `_recency_decay()` definitions in `beam.py` merged into single function
+- SQLite concurrency test failures — WAL mode + proper tearDown cleanup
+- `plugin.yaml` declared only 9 of 15 tools — now declares all 15
+
+### Removed
+
+- Stale v1 project archived from `/root/.hermes/mnemosyne/` → `mnemosyne-v1-archived/`
+- Fabricated APIs from comparison page (removed in commit `b00952e`)
+
+### Tests
+
+- 292 tests passing (up from unknown baseline)
+- New test files: `test_entities.py`, `test_entity_integration.py`, `test_banks.py`, `test_mcp_tools.py`, `test_streaming.py`, `test_temporal_recall.py`
+- All test tearDown methods handle WAL `-wal`/`-shm` files
 
 ---
 
-## 1.13.0
+## [1.x] — Pre-2.0 releases
 
-- **Add temporal queries to `recall()`** — Issue #16. `BeamMemory.recall()` now accepts `from_date`, `to_date`, `source`, and `topic` filters. Date filters are applied at the SQL layer for both working_memory and episodic_memory, reducing result sets before hybrid scoring. Source/topic filter by the `source` column (topic pending dedicated column). All filters are keyword-only and backward-compatible.
-- **Auto-generate temporal triples on `remember()`** — Every `remember()` call now creates a `occurred_on` triple in the TripleStore with the memory ID as subject and YYYY-MM-DD as object. Non-generic sources also get a `has_source` triple. TripleStore initialization is lazy and failure-safe — memory writes never fail if triples are unavailable.
-- **Propagate temporal params through API layers** — `Mnemosyne.recall()` (class), `recall()` (module-level), and `BeamMemory.recall()` all accept the same keyword-only filter signature.
-- **Fix `min_rank` UnboundLocalError in fallback scoring** — When FTS5 returns no working-memory matches but temporal filters are active, `wm_ranks` is empty. Precompute `min_rank`/`rng` before the row loop to avoid referencing undefined locals.
-- **Add 6 tests for temporal queries** — from_date, to_date, source, date range, episodic temporal filter, and auto-generated triples. All 25 tests passing.
+Initial Mnemosyne releases with basic `remember()`/`recall()`/`sleep()` cycle, SQLite + fastembed embeddings, Hermes plugin registration, and AAAK compression.
 
-## 1.12.0
-
-- **Fix: embeddings generated but discarded when sqlite-vec is absent** — Previously, installing `mnemosyne-memory[embeddings]` without `sqlite-vec` produced identical behavior to the core install. Embeddings were generated during consolidation but thrown away because `_vec_available()` returned False. Now embeddings fall back to the `memory_embeddings` table, and `recall()` uses in-memory numpy cosine similarity when sqlite-vec is unavailable. Semantic search works with just `[embeddings]` installed. Closes #15.
-- **Add `_in_memory_vec_search()`** — Cosine similarity search via numpy on the `memory_embeddings` table. Used as fallback when sqlite-vec is absent. No new dependencies (numpy already required by fastembed).
-- **Docs fix:** `sqlite-vec` is now documented as an optional performance optimization (native C vector search in SQLite) rather than a hard requirement for semantic search.
-
-## 1.11.0
-
-- **Fix BUG-1: Context overflow on consolidation** — `sleep()` now chunks memories to fit the LLM context window. `SLEEP_BATCH_SIZE=5000` no longer blindly passes 5000 memories to a 2048-token model. Per-source token-aware chunking with multi-pass consolidation (chunk summaries → second-pass summary).
-- **Fix BUG-2: No remote/API model support** — Added OpenAI-compatible remote LLM client. Set `MNEMOSYNE_LLM_BASE_URL` (e.g., `http://localhost:8080/v1`) to use llama.cpp server, vLLM, Ollama, or any OpenAI-compatible endpoint. `MNEMOSYNE_LLM_API_KEY` for authenticated endpoints. `MNEMOSYNE_LLM_MODEL` for model selection. Falls back to local ctransformers, then aaak encoding.
-- **Add `chunk_memories_by_budget()`** — Splits memory batches by token budget (chars/4 estimate with 20% safety margin). Single oversized memories are skipped from LLM chunking (fall back to aaak).
-- **Add `_call_remote_llm()`** — `httpx` primary, `urllib` fallback. Zero new dependencies. Supports `max_tokens`, `temperature`, `stop` sequences.
-- **Add 7 new tests** — 2 for token-aware chunking, 5 for remote API client. All 24 tests passing.
-
-## 1.10.2
-
-- **Add `mnemosyne_update` and `mnemosyne_forget` tools** — Full CRUD for Hermes plugin. Update content/importance by ID, or hard-delete a memory from both legacy and BEAM tables.
-- **Fix auto-sleep dict key** — `count` → `total` so consolidation triggers correctly. (#12 follow-up)
-- **Fix module-level `remember()` signature** — Added missing `scope` and `valid_until` params.
-- **Fix `update()` BEAM sync** — `Memory.update()` now syncs changes to `working_memory` via new `BeamMemory.update_working()`.
-- **Remove dead `--global` flag** — Cleaned `STATS_SCHEMA` and `_handle_stats` of meaningless `global` parameter.
-- **Fix split-brain session state** — `hermes_plugin/tools.py` now imports `_get_memory()` / `_get_triples()` from `__init__.py` instead of maintaining separate globals.
-- **Remove ghost imports** — Dead `hermes_cli.config` try/except blocks removed from provider and plugin.
-- **Dead code removal** — Removed 6 dead quantization functions, `cosine_similarity`, `calculate_relevance`, `deserialize`, and other unused code. (-307 lines)
-- **Register missing tool schemas** — `mnemosyne_invalidate`, `mnemosyne_export`, `mnemosyne_import` were defined but never registered.
-- **README alignment** — Fixed PyPI badge, VEC_TYPE default (`int8`), Python version (`3.9+`), documented optional REST API.
-- **Align TripleStore default DB** — Changed from `~/.mnemosyne` to `~/.hermes/mnemosyne/data` for consistency.
-- **Fix `_vec_type_cache` stale risk** — Removed unsafe `id(conn)` cache; queries `sqlite_master` each time.
-
-## 1.10.1
-
-- **Fix `get_working_stats()`** — Now counts ALL working memories globally, not just current session. (PR #11 by @rakaarwaky)
-- **Fix `recall()` tracking UPDATE** — Global memories now correctly increment `recall_count` and `last_recalled` when recalled from other sessions. (PR #11 by @rakaarwaky)
-- **Fix column defaults** — `scope` column defaults changed from `'session'` to `'global'` for backward compatibility with pre-scope behavior. (PR #11 by @rakaarwaky)
-- **Fix sqlite-vec KNN query** — `_vec_search()` inlined LIMIT parameter because sqlite-vec's virtual table planner requires the limit at query planning time. Fixes `mnemosyne_recall` failure on systems with sqlite-vec installed. (#12)
-- **Fix triple tools in MemoryProvider** — Added missing `add_triple()` and `query_triples()` module-level functions to `mnemosyne.core.triples`. Aligned triples database path with BEAM memory so triples share the same SQLite file. (#13)
-- **Deprecate `get_global_working_stats()`** — Now aliases `get_working_stats()`. The `--global` CLI flag remains for backward compatibility.
-
-## 1.10.0
-
-- **`hermes mnemosyne stats --global`** — Show working memory stats across all sessions (not just current session). Adds `sessions` count to output.
-- **`mnemosyne_stats(global=true)`** — MemoryProvider tool also supports global stats.
-- Internal: added `BeamMemory.get_global_working_stats()` for global working memory aggregation.
-
-## 1.9.0
-
-- **PyPI release** — `pip install mnemosyne-memory` is now live: https://pypi.org/project/mnemosyne-memory/
-- **Automated releases** — GitHub Actions builds wheels + sdist, creates GitHub releases, and publishes to PyPI on every `v*` tag
-- **Trusted publishing** — PyPI publishing via OIDC (no long-lived API tokens)
-- **CI pipeline** — Tests run on Python 3.9–3.12 on every PR and push
-- **Historical releases** — Retroactively tagged and released v1.0.0, v1.5.0, v1.7.0, and v1.8.0 on GitHub
-- **Modern packaging** — Added `pyproject.toml` (PEP 517) with dynamic version from `mnemosyne/__init__.py`
-- **Test fix** — Disable LLM summarization in cross-session recall test to prevent Chinese-to-English translation during consolidation
-
-## 1.8
-
-- Fix Hermes plugin CLI discovery: add `register(ctx)` to wire up `hermes mnemosyne stats|sleep|inspect|clear|export|import|version`
-- README: clarify deploy script vs pip install paths (Option A / Option B)
-
-## 1.7
-
-- Fix subagent context writes polluting persistent memory (PR #8 by @woaim65)
-- Fix cross-session recall inconsistency: global memories now survive consolidation with scope preserved
-- Fix fallback keyword scoring for Chinese and spaceless languages (character-level overlap)
-- Fix episodic memory having no fallback scan when vector search and FTS5 both miss
-- Fix plugin tools singleton using stale session_id across sessions
-- Add regression tests: subagent context safety, cross-session recall, Chinese substring matching, session singleton updates
-
-## 1.6
-
-- Feature request issue template
-- Documentation improvement issue template
-- Issue template config with links to Discussions and Security advisories
-
-## 1.5
-
-- Fix 6 critical bugs from issue #6 (stats, recall tracking, vector similarity, missing methods, hardcoded session_id)
-- Fix fastembed dependency in setup.py and README (was incorrectly listing sentence-transformers)
-- Official bug report issue template
-- Adopt simplified MAJOR.MINOR versioning
-
-## 1.4
-
-- Full README rewrite: professional, community-focused, benchmarks restored
-- CONTRIBUTING.md added
-- FluxSpeak branding scrubbed (author/metadata corrected)
-- Project image banner added
-
-## 1.3
-
-- Export / import memory for cross-machine migration
-- CLI subcommands: `export`, `import`, `version`
-
-## 1.2
-
-- Mnemosyne as deployable MemoryProvider via Hermes plugin system
-- One-command installer (`python -m mnemosyne.install`)
-- CLI fix: `register_cli` correctly handles subparsers
-
-## 1.1
-
-- Dense retrieval via fastembed (bge-small-en-v1.5)
-- Temporal validity + global scope (`scope="global"`)
-- Recall tracking + recency decay scoring
-- Exact-match deduplication in working memory
-- Local LLM-based sleep consolidation (TinyLlama fallback)
-- BEAM scale limits for 1M+ token capacity
-
-## 1.0
-
-First major release. Production-ready.
-
-- BEAM architecture: working_memory, episodic_memory, scratchpad
-- Native vector search via sqlite-vec (HNSW-style)
-- FTS5 full-text hybrid search (50% vector + 30% FTS + 20% importance)
-- Temporal triples (time-aware knowledge graph)
-- AAAK context compression
-- Configurable vector compression: float32, int8, bit
-- Hermes plugin integration
-- Sub-millisecond latency on CPU
+[2.0.0]: https://github.com/AxDSan/mnemosyne/releases/tag/v2.0.0

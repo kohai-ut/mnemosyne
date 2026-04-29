@@ -45,6 +45,8 @@ def _get_connection(db_path = None) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
         _thread_local.conn = sqlite3.connect(str(path), check_same_thread=False)
         _thread_local.conn.row_factory = sqlite3.Row
+        _thread_local.conn.execute("PRAGMA journal_mode=WAL")
+        _thread_local.conn.execute("PRAGMA busy_timeout=5000")
         _thread_local.db_path = str(path)
     return _thread_local.conn
 
@@ -242,10 +244,10 @@ class Mnemosyne:
                            valid_until=valid_until, scope=scope)
         timestamp = datetime.now().isoformat()
 
-        # Legacy dual-write with same ID
+        # Legacy dual-write with same ID (INSERT OR REPLACE for dedup safety)
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO memories (id, content, source, timestamp, session_id, importance, metadata_json)
+            INSERT OR REPLACE INTO memories (id, content, source, timestamp, session_id, importance, metadata_json)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             memory_id, content, source, timestamp, self.session_id,

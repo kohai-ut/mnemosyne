@@ -21,6 +21,23 @@ from mnemosyne.core.triples import TripleStore
 from mnemosyne.core.memory import remember, recall, _get_connection
 
 
+def _reset_caches():
+    """Reset thread-local connection caches and global singletons."""
+    from mnemosyne.core import memory as _mem, beam as _beam
+    for mod in (_mem, _beam):
+        tl = getattr(mod, "_thread_local", None)
+        if tl and hasattr(tl, "conn") and tl.conn is not None:
+            try:
+                tl.conn.close()
+            except Exception:
+                pass
+            tl.conn = None
+            if hasattr(tl, "db_path"):
+                tl.db_path = None
+    _mem._default_instance = None
+    _mem._default_bank = "default"
+
+
 class TestEntityStorageIntegration(unittest.TestCase):
     """Test entity storage in TripleStore."""
 
@@ -31,7 +48,12 @@ class TestEntityStorageIntegration(unittest.TestCase):
 
     def tearDown(self):
         # TripleStore has no close() method — connection is per-operation
-        os.remove(self.db_path)
+        import glob as _glob
+        for f in _glob.glob(self.db_path + "*"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         os.rmdir(self.tmpdir)
 
     def test_store_entities_as_triples(self):
@@ -120,13 +142,19 @@ class TestRememberEntityIntegration(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmpdir, "test_remember.db")
-        # Set up connection to use our test DB
         os.environ["MNEMOSYNE_DATA_DIR"] = self.tmpdir
+        _reset_caches()
         self.conn = _get_connection(self.db_path)
 
     def tearDown(self):
         self.conn.close()
-        os.remove(self.db_path)
+        _reset_caches()
+        import glob as _glob
+        for f in _glob.glob(self.db_path + "*"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         os.rmdir(self.tmpdir)
         if "MNEMOSYNE_DATA_DIR" in os.environ:
             del os.environ["MNEMOSYNE_DATA_DIR"]
@@ -151,13 +179,19 @@ class TestEndToEndEntityWorkflow(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmpdir, "test_e2e.db")
         os.environ["MNEMOSYNE_DATA_DIR"] = self.tmpdir
+        _reset_caches()
         self.conn = _get_connection(self.db_path)
         self.store = TripleStore(self.db_path)
 
     def tearDown(self):
-        # TripleStore has no close() method — connection is per-operation
         self.conn.close()
-        os.remove(self.db_path)
+        _reset_caches()
+        import glob as _glob
+        for f in _glob.glob(self.db_path + "*"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         os.rmdir(self.tmpdir)
         if "MNEMOSYNE_DATA_DIR" in os.environ:
             del os.environ["MNEMOSYNE_DATA_DIR"]

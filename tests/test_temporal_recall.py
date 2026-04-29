@@ -121,7 +121,12 @@ class TestTemporalRecallEndToEnd(unittest.TestCase):
 
     def tearDown(self):
         self.beam.conn.close()
-        os.remove(self.db_path)
+        import glob as _glob
+        for f in _glob.glob(str(self.db_path) + "*"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         os.rmdir(self.tmpdir)
 
     def test_temporal_boost_recent_vs_old(self):
