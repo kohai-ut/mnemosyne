@@ -97,7 +97,7 @@ class TestToolHandlers:
 
     def test_handle_remember(self, mock_mnemosyne):
         """handle_remember returns success with memory_id."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_remember", {
                 "content": "Test memory",
                 "source": "test",
@@ -111,7 +111,7 @@ class TestToolHandlers:
 
     def test_handle_recall(self, mock_mnemosyne):
         """handle_recall returns list of results."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_recall", {
                 "query": "test query",
                 "top_k": 5,
@@ -124,7 +124,7 @@ class TestToolHandlers:
 
     def test_handle_sleep(self, mock_mnemosyne):
         """handle_sleep returns consolidation stats."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_sleep", {
                 "dry_run": False,
                 "bank": "default"
@@ -136,7 +136,7 @@ class TestToolHandlers:
 
     def test_handle_scratchpad_read(self, mock_mnemosyne):
         """handle_scratchpad_read returns entries."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_scratchpad_read", {
                 "bank": "default"
             })
@@ -146,7 +146,7 @@ class TestToolHandlers:
 
     def test_handle_scratchpad_write(self, mock_mnemosyne):
         """handle_scratchpad_write returns entry_id."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_scratchpad_write", {
                 "content": "New scratchpad entry",
                 "bank": "default"
@@ -156,7 +156,7 @@ class TestToolHandlers:
 
     def test_handle_get_stats(self, mock_mnemosyne):
         """handle_get_stats returns JSON-serializable stats."""
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             result = handle_tool_call("mnemosyne_get_stats", {
                 "bank": "default"
             })
@@ -170,7 +170,7 @@ class TestToolHandlers:
     def test_error_handling(self, mock_mnemosyne):
         """Error handling returns MCP-compliant error results."""
         mock_mnemosyne.remember.side_effect = RuntimeError("DB locked")
-        with patch("mnemosyne.mcp_tools._get_instance", return_value=mock_mnemosyne):
+        with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
             with pytest.raises(RuntimeError, match="DB locked"):
                 handle_tool_call("mnemosyne_remember", {"content": "test"})
 

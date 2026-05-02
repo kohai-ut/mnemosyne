@@ -55,7 +55,7 @@ class TestSchemaMigration:
 
     def test_identity_indexes_exist(self, temp_db):
         bm = BeamMemory(session_id="test", db_path=temp_db)
-        idxs = [r[1] for r in bm.conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()]
+        idxs = [r[0] for r in bm.conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()]
         assert "idx_wm_author" in idxs
         assert "idx_wm_channel" in idxs
         assert "idx_em_author" in idxs

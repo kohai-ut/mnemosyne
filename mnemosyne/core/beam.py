@@ -1053,12 +1053,13 @@ class BeamMemory:
         ]
         wm_params = [datetime.now().isoformat()]
         
-        # Session scope: when any identity filter is explicitly provided,
-        # include all memories matching that filter regardless of session.
-        # Otherwise filter by current session.
-        if channel_id or author_id or author_type:
+        # Session scope: channel filter only when explicitly specified.
+        # Author-only searches have no session/channel restriction.
+        if channel_id:
             wm_where_clauses.append("(session_id = ? OR scope = 'global' OR channel_id = ?)")
-            wm_params.extend([self.session_id, channel_id or self.channel_id])
+            wm_params.extend([self.session_id, channel_id])
+        elif author_id or author_type:
+            wm_where_clauses.append("(1=1)")
         else:
             wm_where_clauses.append("(session_id = ? OR scope = 'global')")
             wm_params.append(self.session_id)
@@ -1228,10 +1229,15 @@ class BeamMemory:
             
             # Also check episodic memory for entity matches
             em_placeholders = ",".join("?" * len(entity_memory_ids))
-            em_entity_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)" if channel_id else "(session_id = ? OR scope = 'global')"
-            em_entity_params = [*tuple(entity_memory_ids), self.session_id]
             if channel_id:
-                em_entity_params.append(channel_id)
+                em_entity_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)"
+                em_entity_params = [*tuple(entity_memory_ids), self.session_id, channel_id]
+            elif author_id or author_type:
+                em_entity_scope = "(1=1)"
+                em_entity_params = [*tuple(entity_memory_ids)]
+            else:
+                em_entity_scope = "(session_id = ? OR scope = 'global')"
+                em_entity_params = [*tuple(entity_memory_ids), self.session_id]
             em_entity_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
                 SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
@@ -1334,10 +1340,15 @@ class BeamMemory:
                     })
             
             # Also check episodic memory for fact matches
-            fact_em_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)" if channel_id else "(session_id = ? OR scope = 'global')"
-            fact_em_params = [*tuple(fact_memory_ids), self.session_id]
             if channel_id:
-                fact_em_params.append(channel_id)
+                fact_em_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)"
+                fact_em_params = [*tuple(fact_memory_ids), self.session_id, channel_id]
+            elif author_id or author_type:
+                fact_em_scope = "(1=1)"
+                fact_em_params = [*tuple(fact_memory_ids)]
+            else:
+                fact_em_scope = "(session_id = ? OR scope = 'global')"
+                fact_em_params = [*tuple(fact_memory_ids), self.session_id]
             fact_em_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
                 SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
@@ -1423,11 +1434,13 @@ class BeamMemory:
         ]
         em_params = [datetime.now().isoformat()]
         
-        # Session scope: when any identity filter is explicitly provided,
-        # include all memories matching that filter regardless of session.
-        if channel_id or author_id or author_type:
+        # Session scope: channel filter only when explicitly specified.
+        # Author-only searches have no session/channel restriction.
+        if channel_id:
             em_where_clauses.append("(session_id = ? OR scope = 'global' OR channel_id = ?)")
-            em_params.extend([self.session_id, channel_id or self.channel_id])
+            em_params.extend([self.session_id, channel_id])
+        elif author_id or author_type:
+            em_where_clauses.append("(1=1)")
         else:
             em_where_clauses.append("(session_id = ? OR scope = 'global')")
             em_params.append(self.session_id)
@@ -1564,12 +1577,19 @@ class BeamMemory:
         wm_ids = [r["id"] for r in final_results if r.get("tier") == "working"]
         em_ids = [r["id"] for r in final_results if r.get("tier") == "episodic"]
         cursor = self.conn.cursor()
+        if channel_id:
+            rec_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)"
+        elif author_id or author_type:
+            rec_scope = "(1=1)"
+        else:
+            rec_scope = "(session_id = ? OR scope = 'global')"
         if wm_ids:
             placeholders = ",".join("?" * len(wm_ids))
-            rec_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)" if (channel_id or author_id or author_type) else "(session_id = ? OR scope = 'global')"
-            rec_params = [now_iso, *tuple(wm_ids), self.session_id]
-            if channel_id or author_id or author_type:
-                rec_params.append(channel_id or self.channel_id)
+            rec_params = [now_iso, *tuple(wm_ids)]
+            if channel_id:
+                rec_params.extend([self.session_id, channel_id])
+            elif not (author_id or author_type):
+                rec_params.append(self.session_id)
             cursor.execute(f"""
                 UPDATE working_memory
                 SET recall_count = recall_count + 1, last_recalled = ?
@@ -1577,9 +1597,11 @@ class BeamMemory:
             """, (*rec_params,))
         if em_ids:
             placeholders = ",".join("?" * len(em_ids))
-            rec_params = [now_iso, *tuple(em_ids), self.session_id]
-            if channel_id or author_id or author_type:
-                rec_params.append(channel_id or self.channel_id)
+            rec_params = [now_iso, *tuple(em_ids)]
+            if channel_id:
+                rec_params.extend([self.session_id, channel_id])
+            elif not (author_id or author_type):
+                rec_params.append(self.session_id)
             cursor.execute(f"""
                 UPDATE episodic_memory
                 SET recall_count = recall_count + 1, last_recalled = ?
