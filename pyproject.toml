@@ -37,9 +37,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-llm = ["ctransformers>=0.2.27", "huggingface-hub>=0.20"]
+llm = ["ctransformers>=0.2.27", "llama-cpp-python>=0.2.0", "huggingface-hub>=0.20"]
 embeddings = ["fastembed>=0.3.0"]
-all = ["ctransformers>=0.2.27", "huggingface-hub>=0.20", "fastembed>=0.3.0"]
+all = ["ctransformers>=0.2.27", "llama-cpp-python>=0.2.0", "huggingface-hub>=0.20", "fastembed>=0.3.0"]
 dev = ["pytest>=7.0", "build", "twine"]
 
 [project.urls]

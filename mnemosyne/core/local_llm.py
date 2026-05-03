@@ -2,8 +2,8 @@
 Mnemosyne Local LLM Consolidation
 =================================
 Lightweight on-device summarization for the sleep/consolidation cycle.
-Uses ctransformers for GGUF model inference. Falls back to aaak encoding
-if the model is unavailable or inference fails.
+Uses llama-cpp-python (ARM64 + x86_64 native) with ctransformers fallback.
+Falls back to aaak encoding if the model is unavailable or inference fails.
 
 Model cache: ~/.hermes/mnemosyne/models/
 Default model: TinyLlama-1.1B-Chat-v1.0-GGUF (Q4_K_M, ~600MB)
@@ -39,6 +39,7 @@ LLM_REMOTE_MODEL = os.environ.get("MNEMOSYNE_LLM_MODEL", "")
 
 # --- Lazy singleton ----------------------------------------------------------
 _llm_instance = None
+_llm_backend = None  # "llamacpp", "ctransformers", or None
 _llm_available = None  # None = not checked yet
 
 
@@ -79,23 +80,62 @@ def _download_model() -> Path:
     return Path(downloaded)
 
 
-def _load_llm():
-    """Lazy-load the ctransformers model. Returns None on failure."""
-    global _llm_instance, _llm_available
-    if _llm_instance is not None:
-        return _llm_instance
-    if not LLM_ENABLED:
-        _llm_available = False
+def _load_llm_llamacpp(model_path: Path):
+    """Load the GGUF model via llama-cpp-python. Returns Llama instance or None."""
+    try:
+        from llama_cpp import Llama
+    except ImportError:
         return None
 
+    try:
+        llm = Llama(
+            model_path=str(model_path),
+            n_ctx=LLM_N_CTX,
+            n_threads=LLM_N_THREADS,
+            verbose=False,
+        )
+        return llm
+    except Exception:
+        return None
+
+
+def _load_llm_ctransformers(model_path: Path):
+    """Load the GGUF model via ctransformers (x86_64 only). Returns model or None."""
     _ensure_sys_path()
 
     try:
         from ctransformers import AutoModelForCausalLM
     except ImportError:
+        return None
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            model_type="llama",
+            max_new_tokens=LLM_MAX_TOKENS,
+            threads=LLM_N_THREADS,
+            context_length=LLM_N_CTX,
+        )
+    except Exception:
+        return None
+
+
+def _load_llm():
+    """Lazy-load the best available local LLM backend.
+    
+    Priority: llama-cpp-python > ctransformers (x86_64 fallback).
+    Returns the loaded model/LLM instance, or None if no backend works.
+    """
+    global _llm_instance, _llm_backend, _llm_available
+
+    if _llm_instance is not None:
+        return _llm_instance
+
+    if not LLM_ENABLED:
         _llm_available = False
         return None
 
+    # Get or download model file
     model_file = _model_path()
     if model_file is None:
         try:
@@ -104,25 +144,54 @@ def _load_llm():
             _llm_available = False
             return None
 
-    try:
-        _llm_instance = AutoModelForCausalLM.from_pretrained(
-            str(model_file),
-            model_type="llama",
-            max_new_tokens=LLM_MAX_TOKENS,
-            threads=LLM_N_THREADS,
-            context_length=LLM_N_CTX,
-        )
+    # Try llama-cpp-python first (works on ARM64 + x86_64)
+    llm = _load_llm_llamacpp(model_file)
+    if llm is not None:
+        _llm_instance = llm
+        _llm_backend = "llamacpp"
         _llm_available = True
         return _llm_instance
+
+    # Fall back to ctransformers (x86_64 only)
+    llm = _load_llm_ctransformers(model_file)
+    if llm is not None:
+        _llm_instance = llm
+        _llm_backend = "ctransformers"
+        _llm_available = True
+        return _llm_instance
+
+    _llm_available = False
+    return None
+
+
+def _call_local_llm(prompt: str) -> Optional[str]:
+    """Run inference on the local LLM using whichever backend is loaded."""
+    llm = _load_llm()
+    if llm is None:
+        return None
+
+    try:
+        if _llm_backend == "llamacpp":
+            # llama-cpp-python uses chat completion API
+            response = llm.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=LLM_MAX_TOKENS,
+                stop=["</s>", "<|user|>"],
+                temperature=0.3,
+            )
+            choices = response.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "")
+            return None
+        else:
+            # ctransformers uses direct callable
+            return llm(prompt, max_new_tokens=LLM_MAX_TOKENS, stop=["</s>", "<|user|>"])
     except Exception:
-        _llm_available = False
         return None
 
 
 def _build_prompt(memories: List[str], source: str = "") -> str:
     """Build a consolidation prompt from a list of memory strings."""
-    # TinyLlama-1.1B-Chat uses the Zephyr format:
-    # <|user|>\n...\n</s>\n<|assistant|>\n
     header = (
         "Summarize the following memories into 1-3 concise sentences. "
         "Preserve facts, names, preferences, and decisions. Discard fluff."
@@ -137,14 +206,11 @@ def _build_prompt(memories: List[str], source: str = "") -> str:
 
 def _clean_output(text: str) -> str:
     """Strip assistant tokens and extra whitespace from model output."""
-    # Remove any echoed prompt fragments
     text = text.replace("<|assistant|>", "").replace("<|user|>", "")
     text = text.replace("</s>", "").strip()
-    # If the model echoed the instructions, cut up to the first real sentence
     text = re.sub(r"^(Summarize the following memories.*?[.!?:]\s*)", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"^(Preserve facts.*?[.!?:]\s*)", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"^Source:.*?\n", "", text, flags=re.IGNORECASE)
-    # Remove bullet echoes
     text = re.sub(r"^\s*[-*]\s.*\n", "", text, flags=re.MULTILINE)
     return text.strip()
 
@@ -156,17 +222,14 @@ def _estimate_tokens(text: str) -> int:
 
 def _prompt_token_budget() -> int:
     """Return usable token budget for memory content (reserves overhead + output)."""
-    overhead = 80  # system prompt, formatting tokens, stop sequences
+    overhead = 80
     output_reserve = LLM_MAX_TOKENS
-    safety_margin = int(LLM_N_CTX * 0.2)  # 20% safety buffer
+    safety_margin = int(LLM_N_CTX * 0.2)
     return max(64, LLM_N_CTX - overhead - output_reserve - safety_margin)
 
 
 def chunk_memories_by_budget(memories: List[str], source: str = "") -> List[List[str]]:
-    """
-    Split memories into chunks that fit within the LLM context window.
-    Returns list of memory sublists, each safe to pass to summarize_memories().
-    """
+    """Split memories into chunks that fit within the LLM context window."""
     if not memories:
         return []
 
@@ -175,7 +238,6 @@ def chunk_memories_by_budget(memories: List[str], source: str = "") -> List[List
     current_chunk = []
     current_tokens = 0
 
-    # Header overhead
     header = (
         "Summarize the following memories into 1-3 concise sentences. "
         "Preserve facts, names, preferences, and decisions. Discard fluff."
@@ -184,23 +246,17 @@ def chunk_memories_by_budget(memories: List[str], source: str = "") -> List[List
         header += f" Source: {source}."
     header_tokens = _estimate_tokens(header + "\n\n")
 
-    # Format overhead per memory ("- " + "\n")
     format_overhead = _estimate_tokens("- \n")
-
     available = budget - header_tokens
 
     for memory in memories:
         mem_tokens = _estimate_tokens(memory) + format_overhead
-
-        # If a single memory exceeds the entire budget, skip it (will fall back to aaak)
         if mem_tokens > budget:
             continue
-
         if current_tokens + mem_tokens > available and current_chunk:
             chunks.append(current_chunk)
             current_chunk = []
             current_tokens = 0
-
         current_chunk.append(memory)
         current_tokens += mem_tokens
 
@@ -211,9 +267,8 @@ def chunk_memories_by_budget(memories: List[str], source: str = "") -> List[List
 
 
 def llm_available() -> bool:
-    """Check whether the local LLM is loaded and ready."""
+    """Check whether any LLM backend (local or remote) is available."""
     global _llm_available
-    # Remote LLM is always "available" if configured (we'll discover at call time)
     if LLM_BASE_URL:
         return True
     if _llm_available is not None:
@@ -229,7 +284,6 @@ def _call_remote_llm(prompt: str) -> Optional[str]:
 
     import json
 
-    # Try httpx first, fall back to urllib
     try:
         import httpx
         has_httpx = True
@@ -241,13 +295,11 @@ def _call_remote_llm(prompt: str) -> Optional[str]:
     if LLM_API_KEY:
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
 
-    model = LLM_REMOTE_MODEL or "local"  # llama.cpp server accepts any model name
+    model = LLM_REMOTE_MODEL or "local"
 
     payload = {
         "model": model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": LLM_MAX_TOKENS,
         "temperature": 0.3,
         "stop": ["</s>", "<|user|>"]
@@ -279,32 +331,30 @@ def _call_remote_llm(prompt: str) -> Optional[str]:
 
 
 def summarize_memories(memories: List[str], source: str = "") -> Optional[str]:
-    """
-    Summarize a batch of working-memory items into a single episodic string.
-    Returns None if the LLM is unavailable or inference fails (caller should
-    fall back to aaak encoding).
+    """Summarize a batch of working-memory items into a single episodic string.
+    
+    Fallback chain:
+    1. Remote OpenAI-compatible API (if MNEMOSYNE_LLM_BASE_URL is set)
+    2. llama-cpp-python (ARM64 + x86_64 native)
+    3. ctransformers (x86_64 only, legacy)
+    4. Return None → caller falls back to AAAK encoding
     """
     if not memories:
         return None
 
     prompt = _build_prompt(memories, source=source)
-    raw = None
 
-    # --- Try remote LLM first if configured ---
+    # 1. Remote API
     if LLM_BASE_URL:
         raw = _call_remote_llm(prompt)
         if raw:
             cleaned = _clean_output(raw)
             return cleaned if cleaned else None
 
-    # --- Fall back to local ctransformers ---
-    llm = _load_llm()
-    if llm is not None:
-        try:
-            raw = llm(prompt, max_new_tokens=LLM_MAX_TOKENS, stop=["</s>", "<|user|>"])
-            cleaned = _clean_output(raw)
-            return cleaned if cleaned else None
-        except Exception:
-            pass
+    # 2. Local LLM (llama-cpp-python or ctransformers fallback)
+    raw = _call_local_llm(prompt)
+    if raw:
+        cleaned = _clean_output(raw)
+        return cleaned if cleaned else None
 
     return None
