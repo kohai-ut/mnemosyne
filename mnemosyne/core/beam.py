@@ -54,6 +54,14 @@ SLEEP_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_SLEEP_BATCH", "5000"))
 SCRATCHPAD_MAX_ITEMS = int(os.environ.get("MNEMOSYNE_SP_MAX", "1000"))
 RECENCY_HALFLIFE_HOURS = float(os.environ.get("MNEMOSYNE_RECENCY_HALFLIFE", "168"))  # 1 week default
 
+# Tiered episodic degradation
+TIER2_DAYS = int(os.environ.get("MNEMOSYNE_TIER2_DAYS", "30"))
+TIER3_DAYS = int(os.environ.get("MNEMOSYNE_TIER3_DAYS", "180"))
+TIER1_WEIGHT = float(os.environ.get("MNEMOSYNE_TIER1_WEIGHT", "1.0"))
+TIER2_WEIGHT = float(os.environ.get("MNEMOSYNE_TIER2_WEIGHT", "0.5"))
+TIER3_WEIGHT = float(os.environ.get("MNEMOSYNE_TIER3_WEIGHT", "0.25"))
+DEGRADE_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_DEGRADE_BATCH", "100"))
+
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
 if VEC_TYPE not in ("float32", "int8", "bit"):
@@ -150,6 +158,17 @@ def init_beam(db_path: Path = None):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_session ON episodic_memory(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_timestamp ON episodic_memory(timestamp)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_source ON episodic_memory(source)")
+
+    # --- Tiered degradation migration (v2.3) ---
+    try:
+        cursor.execute("ALTER TABLE episodic_memory ADD COLUMN tier INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE episodic_memory ADD COLUMN degraded_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_tier ON episodic_memory(tier)")
 
     # --- SCRATCHPAD ---
     cursor.execute("""
@@ -1569,6 +1588,22 @@ class BeamMemory:
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None
                     })
 
+        # --- Tiered degradation weighting: apply tier multiplier to episodic scores ---
+        weight_map = {1: TIER1_WEIGHT, 2: TIER2_WEIGHT, 3: TIER3_WEIGHT}
+        em_ids_for_tier = [r["id"] for r in results if r.get("tier") == "episodic"]
+        if em_ids_for_tier:
+            placeholders = ",".join("?" * len(em_ids_for_tier))
+            tier_rows = cursor.execute(
+                f"SELECT id, tier FROM episodic_memory WHERE id IN ({placeholders})",
+                em_ids_for_tier
+            ).fetchall()
+            tier_lookup = {r["id"]: (r["tier"] or 1) for r in tier_rows}
+            for r in results:
+                if r.get("tier") == "episodic":
+                    ep_tier = tier_lookup.get(r["id"], 1)
+                    r["degradation_tier"] = ep_tier
+                    r["score"] *= weight_map.get(ep_tier, 1.0)
+
         results.sort(key=lambda x: x["score"], reverse=True)
         final_results = results[:top_k]
 
@@ -1669,6 +1704,82 @@ class BeamMemory:
     def scratchpad_clear(self):
         self.conn.execute("DELETE FROM scratchpad WHERE session_id = ?", (self.session_id,))
         self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Tiered Episodic Degradation
+    # ------------------------------------------------------------------
+    def degrade_episodic(self, dry_run: bool = False) -> Dict:
+        """Degrade old episodic memories through tier 1→2→3 compression.
+
+        Tier 1 (0-TIER2_DAYS): Full detail, 1.0x recall weight
+        Tier 2 (TIER2_DAYS-TIER3_DAYS): LLM-summarized, 0.5x weight
+        Tier 3 (TIER3_DAYS+): Text extraction compressed, 0.25x weight
+
+        Returns summary of tier transitions performed.
+        """
+        cursor = self.conn.cursor()
+        now = datetime.now()
+        results = {"status": "dry_run" if dry_run else "degraded",
+                   "tier1_to_tier2": 0, "tier2_to_tier3": 0}
+
+        # --- Find candidates for degradation ---
+        tier2_cutoff = (now - timedelta(days=TIER2_DAYS)).isoformat()
+        tier3_cutoff = (now - timedelta(days=TIER3_DAYS)).isoformat()
+
+        # Tier 1 → Tier 2: old enough, still at tier 1
+        cursor.execute("""
+            SELECT id, content, importance FROM episodic_memory
+            WHERE tier = 1 AND created_at < ?
+            ORDER BY created_at ASC LIMIT ?
+        """, (tier2_cutoff, DEGRADE_BATCH_SIZE))
+        tier1_rows = cursor.fetchall()
+
+        # Tier 2 → Tier 3: very old, at tier 2
+        cursor.execute("""
+            SELECT id, content FROM episodic_memory
+            WHERE tier = 2 AND created_at < ?
+            ORDER BY created_at ASC LIMIT ?
+        """, (tier3_cutoff, DEGRADE_BATCH_SIZE // 2))
+        tier2_rows = cursor.fetchall()
+
+        if dry_run:
+            results["tier1_to_tier2"] = len(tier1_rows)
+            results["tier2_to_tier3"] = len(tier2_rows)
+            return results
+
+        # --- Degrade tier 1 → tier 2: LLM summarization ---
+        from mnemosyne.core import local_llm
+        for row in tier1_rows:
+            try:
+                compressed = row["content"]
+                if local_llm.llm_available() and len(row["content"]) > 300:
+                    compressed = local_llm.summarize(row["content"], max_chars=400)
+                cursor.execute(
+                    "UPDATE episodic_memory SET content = ?, tier = 2, degraded_at = ? WHERE id = ?",
+                    (compressed[:800], now.isoformat(), row["id"])
+                )
+                results["tier1_to_tier2"] += 1
+            except Exception:
+                pass
+
+        # --- Degrade tier 2 → tier 3: text extraction (keep key entities) ---
+        for row in tier2_rows:
+            try:
+                content = row["content"]
+                # Extract first 200 chars as key summary — keep the signal
+                compressed = content[:200]
+                if len(content) > 200:
+                    compressed += " [...]"
+                cursor.execute(
+                    "UPDATE episodic_memory SET content = ?, tier = 3, degraded_at = ? WHERE id = ?",
+                    (compressed, now.isoformat(), row["id"])
+                )
+                results["tier2_to_tier3"] += 1
+            except Exception:
+                pass
+
+        self.conn.commit()
+        return results
 
     # ------------------------------------------------------------------
     # Consolidation / Sleep
@@ -1785,13 +1896,17 @@ class BeamMemory:
             """, (self.session_id, len(consolidated_ids), f"{summaries_created} summaries ({method}) from {len(consolidated_ids)} items"))
             self.conn.commit()
 
+        # Run tiered degradation after consolidation
+        degrade_result = self.degrade_episodic(dry_run=dry_run)
+
         return {
             "status": "dry_run" if dry_run else "consolidated",
             "items_consolidated": len(consolidated_ids),
             "summaries_created": summaries_created,
             "llm_used": llm_used_count,
             "method": method,
-            "consolidated_ids": consolidated_ids
+            "consolidated_ids": consolidated_ids,
+            "degradation": degrade_result
         }
 
     def sleep_all_sessions(self, dry_run: bool = False) -> Dict:
@@ -1855,6 +1970,9 @@ class BeamMemory:
             except Exception as exc:
                 errors.append({"session_id": session_id, "error": repr(exc)})
 
+        # Run tiered degradation after all-sessions consolidation
+        degrade_result = self.degrade_episodic(dry_run=dry_run)
+
         return {
             "status": "dry_run" if dry_run else ("consolidated" if items_consolidated else "no_op"),
             "sessions_scanned": len(session_rows),
@@ -1865,6 +1983,7 @@ class BeamMemory:
             "errors": len(errors),
             "error_details": errors,
             "session_results": session_results,
+            "degradation": degrade_result
         }
 
     def get_consolidation_log(self, limit: int = 10) -> List[Dict]:
