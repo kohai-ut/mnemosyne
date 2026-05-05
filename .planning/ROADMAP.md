@@ -2,7 +2,7 @@
 
 **Updated:** 2026-05-05
 
-## Phase 1: Core Degradation Engine (Active)
+## Phase 1: Core Degradation Engine ✅ Complete
 
 ### Wave 1: Schema Migration
 - Add `tier` and `degraded_at` columns to `episodic_memory`
@@ -29,9 +29,15 @@
 - Add degradation stats to sleep return value
 
 ### Wave 6: Tests & Verification
-- Unit tests for tier transitions
-- Integration test: store → wait → degrade → recall
-- Benchmark: recall latency before/after
+- 10 tests: schema, transitions, dry run, batch limit, weighting, sleep integration, end-to-end recall
+- All 39 beam tests passing
 
-## Phase 2: Dashboard Visibility (Planned)
-## Phase 3: Smarter Compression (Planned)
+## Phase 2: Smarter Compression (Planned)
+- Entity-aware extraction instead of naive first-200-chars for tier 2→3
+- Use structured extraction pipeline for key signal preservation
+- Keep degraded content semantically searchable
+
+## Phase 3: Memory Confidence (TBD)
+- Add confidence/veracity signal to memories
+- Distinguish user-stated facts from assistant inferences
+- Surface potentially contaminated memories for review
