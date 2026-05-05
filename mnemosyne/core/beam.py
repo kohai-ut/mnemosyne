@@ -64,6 +64,13 @@ DEGRADE_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_DEGRADE_BATCH", "100"))
 SMART_COMPRESS = os.environ.get("MNEMOSYNE_SMART_COMPRESS", "1") not in ("0", "false", "no")
 TIER3_MAX_CHARS = int(os.environ.get("MNEMOSYNE_TIER3_MAX_CHARS", "300"))
 
+# Veracity weighting (memory confidence)
+STATED_WEIGHT = float(os.environ.get("MNEMOSYNE_STATED_WEIGHT", "1.0"))
+INFERRED_WEIGHT = float(os.environ.get("MNEMOSYNE_INFERRED_WEIGHT", "0.7"))
+TOOL_WEIGHT = float(os.environ.get("MNEMOSYNE_TOOL_WEIGHT", "0.5"))
+IMPORTED_WEIGHT = float(os.environ.get("MNEMOSYNE_IMPORTED_WEIGHT", "0.6"))
+UNKNOWN_WEIGHT = float(os.environ.get("MNEMOSYNE_UNKNOWN_WEIGHT", "0.8"))
+
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
 if VEC_TYPE not in ("float32", "int8", "bit"):
@@ -135,6 +142,7 @@ def init_beam(db_path: Path = None):
             session_id TEXT DEFAULT 'default',
             importance REAL DEFAULT 0.5,
             metadata_json TEXT,
+            veracity TEXT DEFAULT 'unknown',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -154,6 +162,7 @@ def init_beam(db_path: Path = None):
             importance REAL DEFAULT 0.5,
             metadata_json TEXT,
             summary_of TEXT DEFAULT '',
+            veracity TEXT DEFAULT 'unknown',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -171,6 +180,16 @@ def init_beam(db_path: Path = None):
     except sqlite3.OperationalError:
         pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_tier ON episodic_memory(tier)")
+
+    # --- Veracity migration (v2.4) ---
+    try:
+        cursor.execute("ALTER TABLE working_memory ADD COLUMN veracity TEXT DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE episodic_memory ADD COLUMN veracity TEXT DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass
 
     # --- SCRATCHPAD ---
     cursor.execute("""
@@ -712,7 +731,8 @@ class BeamMemory:
                  valid_until: str = None, scope: str = "session",
                  memory_id: str = None,
                  extract_entities: bool = False,
-                 extract: bool = False) -> str:
+                 extract: bool = False,
+                 veracity: str = "unknown") -> str:
         """Store into working_memory. Deduplicates exact content matches.
 
         When called from the legacy-compatible Mnemosyne.remember() path,
@@ -731,6 +751,7 @@ class BeamMemory:
             extract_entities: If True, extract and store entity mentions as triples
             extract: If True, extract structured facts from content using LLM
                 and store as triples. Default False.
+            veracity: Confidence level — 'stated', 'inferred', 'tool', 'imported', 'unknown'
         """
         # --- Deduplication: exact match ---
         existing_id = self._find_duplicate(content)
@@ -758,11 +779,11 @@ class BeamMemory:
         cursor.execute("""
             INSERT INTO working_memory
             (id, content, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-             author_id, author_type, channel_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             author_id, author_type, channel_id, veracity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory_id, content, source, timestamp, self.session_id, importance,
               json.dumps(metadata or {}), valid_until, scope,
-              self.author_id, self.author_type, self.channel_id))
+              self.author_id, self.author_type, self.channel_id, veracity))
         self.conn.commit()
         self._trim_working_memory()
 
@@ -999,6 +1020,7 @@ class BeamMemory:
                author_id: Optional[str] = None,
                author_type: Optional[str] = None,
                channel_id: Optional[str] = None,
+               veracity: Optional[str] = None,
                temporal_weight: float = 0.0,
                query_time: Optional[Any] = None,
                temporal_halflife: Optional[float] = None,
@@ -1098,6 +1120,9 @@ class BeamMemory:
             # Topic stored in source field for now (pending dedicated topic column)
             wm_where_clauses.append("source = ?")
             wm_params.append(topic)
+        if veracity:
+            wm_where_clauses.append("veracity = ?")
+            wm_params.append(veracity)
         if author_id:
             wm_where_clauses.append("author_id = ?")
             wm_params.append(author_id)
@@ -1114,7 +1139,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(wm_ids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1124,7 +1149,7 @@ class BeamMemory:
             # Fallback: fetch recent items and score in Python (old path)
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM working_memory
                 WHERE {wm_where}
                 ORDER BY timestamp DESC
@@ -1190,6 +1215,7 @@ class BeamMemory:
                     "author_id": row["author_id"] if "author_id" in row.keys() else None,
                     "author_type": row["author_type"] if "author_type" in row.keys() else None,
                     "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                    "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                     "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                     "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None
                 })
@@ -1201,7 +1227,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(entity_memory_ids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1243,6 +1269,7 @@ class BeamMemory:
                         "author_id": row["author_id"] if "author_id" in row.keys() else None,
                         "author_type": row["author_type"] if "author_type" in row.keys() else None,
                         "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                        "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                         "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
                         "entity_match": True
@@ -1261,7 +1288,7 @@ class BeamMemory:
                 em_entity_params = [*tuple(entity_memory_ids), self.session_id]
             em_entity_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM episodic_memory
                 WHERE id IN ({em_placeholders})
                   AND {em_entity_scope}
@@ -1303,6 +1330,7 @@ class BeamMemory:
                         "author_id": row["author_id"] if "author_id" in row.keys() else None,
                         "author_type": row["author_type"] if "author_type" in row.keys() else None,
                         "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                        "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                         "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
                         "entity_match": True
@@ -1315,7 +1343,7 @@ class BeamMemory:
             cursor = self.conn.cursor()
             # Check working_memory for fact matches
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1355,6 +1383,7 @@ class BeamMemory:
                         "author_id": row["author_id"] if "author_id" in row.keys() else None,
                         "author_type": row["author_type"] if "author_type" in row.keys() else None,
                         "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                        "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                         "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
                         "fact_match": True
@@ -1372,7 +1401,7 @@ class BeamMemory:
                 fact_em_params = [*tuple(fact_memory_ids), self.session_id]
             fact_em_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
                 FROM episodic_memory
                 WHERE id IN ({placeholders})
                   AND {fact_em_scope}
@@ -1414,6 +1443,7 @@ class BeamMemory:
                         "author_id": row["author_id"] if "author_id" in row.keys() else None,
                         "author_type": row["author_type"] if "author_type" in row.keys() else None,
                         "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                        "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                         "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
                         "fact_match": True
@@ -1478,6 +1508,9 @@ class BeamMemory:
         if topic:
             em_where_clauses.append("source = ?")
             em_params.append(topic)
+        if veracity:
+            em_where_clauses.append("veracity = ?")
+            em_params.append(veracity)
         if author_id:
             em_where_clauses.append("author_id = ?")
             em_params.append(author_id)
@@ -1586,25 +1619,33 @@ class BeamMemory:
                         "author_id": row["author_id"] if "author_id" in row.keys() else None,
                         "author_type": row["author_type"] if "author_type" in row.keys() else None,
                         "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
+                        "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
                         "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
                         "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None
                     })
 
         # --- Tiered degradation weighting: apply tier multiplier to episodic scores ---
         weight_map = {1: TIER1_WEIGHT, 2: TIER2_WEIGHT, 3: TIER3_WEIGHT}
+        veracity_map = {"stated": STATED_WEIGHT, "inferred": INFERRED_WEIGHT,
+                        "tool": TOOL_WEIGHT, "imported": IMPORTED_WEIGHT,
+                        "unknown": UNKNOWN_WEIGHT}
         em_ids_for_tier = [r["id"] for r in results if r.get("tier") == "episodic"]
         if em_ids_for_tier:
             placeholders = ",".join("?" * len(em_ids_for_tier))
             tier_rows = cursor.execute(
-                f"SELECT id, tier FROM episodic_memory WHERE id IN ({placeholders})",
+                f"SELECT id, tier, veracity FROM episodic_memory WHERE id IN ({placeholders})",
                 em_ids_for_tier
             ).fetchall()
             tier_lookup = {r["id"]: (r["tier"] or 1) for r in tier_rows}
+            veracity_lookup = {r["id"]: (r["veracity"] or "unknown") for r in tier_rows}
             for r in results:
                 if r.get("tier") == "episodic":
                     ep_tier = tier_lookup.get(r["id"], 1)
+                    ep_veracity = veracity_lookup.get(r["id"], "unknown")
                     r["degradation_tier"] = ep_tier
+                    r["veracity"] = ep_veracity
                     r["score"] *= weight_map.get(ep_tier, 1.0)
+                    r["score"] *= veracity_map.get(ep_veracity, UNKNOWN_WEIGHT)
 
         results.sort(key=lambda x: x["score"], reverse=True)
         final_results = results[:top_k]
@@ -1849,6 +1890,29 @@ class BeamMemory:
 
         self.conn.commit()
         return results
+
+    def get_contaminated(self, limit: int = 50, min_importance: float = 0.0) -> List[Dict]:
+        """Return potentially contaminated memories for review.
+
+        Contaminated = veracity in ('inferred', 'tool', 'imported', 'unknown')
+        — i.e., anything not explicitly stated by the user. Sorted by
+        importance descending so the highest-stakes items surface first.
+
+        Args:
+            limit: Max memories to return
+            min_importance: Only return memories with importance >= this
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT id, content, source, veracity, tier, importance,
+                   created_at, degraded_at, session_id
+            FROM episodic_memory
+            WHERE veracity IN ('inferred', 'tool', 'imported', 'unknown')
+              AND importance >= ?
+            ORDER BY importance DESC, created_at DESC
+            LIMIT ?
+        """, (min_importance, limit))
+        return [dict(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
     # Consolidation / Sleep

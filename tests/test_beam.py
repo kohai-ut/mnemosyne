@@ -978,3 +978,143 @@ class TestSmartCompression:
             f"Smart compression should preserve critical entities. Got: {tier3_content}"
         )
         # Naive prefix would have kept "Morning standup was uneventful" — useless
+
+
+class TestVeracity:
+    """Phase 3: memory confidence / veracity signal."""
+
+    def test_schema_adds_veracity_columns(self, temp_db):
+        """init_beam should add veracity to working_memory and episodic_memory."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+
+        conn = sqlite3.connect(temp_db)
+        wm_cols = [r[1] for r in conn.execute("PRAGMA table_info(working_memory)").fetchall()]
+        em_cols = [r[1] for r in conn.execute("PRAGMA table_info(episodic_memory)").fetchall()]
+        conn.close()
+        assert "veracity" in wm_cols
+        assert "veracity" in em_cols
+
+    def test_remember_defaults_to_unknown(self, temp_db):
+        """remember() without explicit veracity defaults to 'unknown'."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        mid = beam.remember("A fact", source="test", importance=0.5)
+
+        conn = sqlite3.connect(temp_db)
+        veracity = conn.execute(
+            "SELECT veracity FROM working_memory WHERE id = ?", (mid,)
+        ).fetchone()[0]
+        conn.close()
+        assert veracity == "unknown"
+
+    def test_remember_explicit_veracity(self, temp_db):
+        """remember() with veracity='stated' stores correctly."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        mid = beam.remember("User said this", source="user", veracity="stated")
+
+        conn = sqlite3.connect(temp_db)
+        veracity = conn.execute(
+            "SELECT veracity FROM working_memory WHERE id = ?", (mid,)
+        ).fetchone()[0]
+        conn.close()
+        assert veracity == "stated"
+
+    def test_recall_veracity_filter(self, temp_db):
+        """recall(veracity='stated') should only return stated memories."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        beam.remember("Stated preference: dark mode", source="user", veracity="stated")
+        beam.remember("Inferred: probably likes Python", source="conversation", veracity="inferred")
+        beam.remember("Tool output: cron ran at 3am", source="cron", veracity="tool")
+
+        results = beam.recall("preference", veracity="stated")
+        assert all(r["veracity"] == "stated" for r in results)
+        assert any("dark mode" in r["content"] for r in results)
+
+    def test_veracity_weighting_in_recall(self, temp_db, monkeypatch):
+        """Stated memories should score higher than inferred ones."""
+        monkeypatch.setattr("mnemosyne.core.beam.STATED_WEIGHT", 1.0)
+        monkeypatch.setattr("mnemosyne.core.beam.INFERRED_WEIGHT", 0.3)
+
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        # Consolidate two similar memories with different veracity
+        beam.consolidate_to_episodic(
+            summary="User stated: prefers Rust for systems programming",
+            source_wm_ids=["wm1"],
+            importance=0.8
+        )
+        beam.consolidate_to_episodic(
+            summary="Inferred: agent thinks user likes Go",
+            source_wm_ids=["wm2"],
+            importance=0.8
+        )
+
+        # Set veracity directly in DB
+        conn = sqlite3.connect(temp_db)
+        conn.execute("UPDATE episodic_memory SET veracity = 'stated' WHERE content LIKE '%stated%'")
+        conn.execute("UPDATE episodic_memory SET veracity = 'inferred' WHERE content LIKE '%Inferred%'")
+        conn.commit()
+        conn.close()
+
+        results = beam.recall("systems programming language", top_k=5)
+        stated_results = [r for r in results if r.get("veracity") == "stated"]
+        inferred_results = [r for r in results if r.get("veracity") == "inferred"]
+
+        if stated_results and inferred_results:
+            assert stated_results[0]["score"] > inferred_results[0]["score"], (
+                f"Stated score {stated_results[0]['score']} should exceed inferred {inferred_results[0]['score']}"
+            )
+
+    def test_get_contaminated_returns_non_stated(self, temp_db):
+        """get_contaminated() should return inferred/tool/imported/unknown but not stated."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+
+        eids = []
+        for content, veracity_val in [
+            ("User said this explicitly", "stated"),
+            ("Agent inferred this", "inferred"),
+            ("Cron injected this", "tool"),
+            ("Imported from Mem0", "imported"),
+            ("Legacy uncategorized memory", "unknown"),
+        ]:
+            eid = beam.consolidate_to_episodic(
+                summary=content, source_wm_ids=["wm"], importance=0.8
+            )
+            eids.append(eid)
+
+        conn = sqlite3.connect(temp_db)
+        for eid, veracity_val in zip(eids, ["stated", "inferred", "tool", "imported", "unknown"]):
+            conn.execute("UPDATE episodic_memory SET veracity = ? WHERE id = ?", (veracity_val, eid))
+        conn.commit()
+        conn.close()
+
+        contaminated = beam.get_contaminated(limit=10)
+        contents = [c["content"] for c in contaminated]
+        assert any("inferred" in c for c in contents)
+        assert any("Cron injected" in c for c in contents)
+        assert any("Imported" in c for c in contents)
+        assert any("Legacy" in c for c in contents)
+        # Stated should NOT appear
+        assert not any("explicitly" in c for c in contents)
+
+    def test_get_contaminated_respects_importance(self, temp_db):
+        """get_contaminated() with min_importance filter."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+
+        eid = beam.consolidate_to_episodic(
+            summary="Low importance memory", source_wm_ids=["wm"], importance=0.2
+        )
+        conn = sqlite3.connect(temp_db)
+        conn.execute("UPDATE episodic_memory SET veracity = 'inferred' WHERE id = ?", (eid,))
+        conn.commit()
+        conn.close()
+
+        results = beam.get_contaminated(limit=10, min_importance=0.5)
+        assert len(results) == 0, "Low importance should be filtered out"
+
+    def test_recall_still_works_without_veracity_filter(self, temp_db):
+        """recall() without veracity filter should return all memories."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        beam.remember("Fact A", veracity="stated")
+        beam.remember("Fact B", veracity="inferred")
+
+        results = beam.recall("Fact", top_k=10)
+        assert len(results) >= 2
