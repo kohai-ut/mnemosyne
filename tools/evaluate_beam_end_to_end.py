@@ -57,7 +57,7 @@ from mnemosyne.core.beam import BeamMemory, init_beam, _embeddings, _vec_availab
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-DEFAULT_MODEL = "google/gemini-2.5-flash"
+DEFAULT_MODEL = "google/gemini-flash-latest"
 FALLBACK_MODELS = [
     "google/gemini-2.5-pro",  
 ]
@@ -473,17 +473,19 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
 #  LLM Answering with Mnemosyne Memory
 # ============================================================
 
-ANSWER_SYSTEM_PROMPT = """You are a careful memory analyst. You have access to retrieved conversation memories.
+ANSWER_SYSTEM_PROMPT = """You are a helpful assistant answering questions about a user's past conversations. You have access to retrieved conversation memories.
 
-Your job: answer questions about the conversation using ONLY the provided information.
+Your job: answer questions using the provided memories. Give the BEST answer you can based on the most relevant information, even if some details are unclear.
 
 CRITICAL RULES:
-- If there are CONTRADICTIONS in the memories (e.g. user said X but also said not-X), you MUST identify them and say "You stated both X and not-X. This is contradictory."
-- For EVENT ORDERING questions, extract timestamps, indices, or explicit ordering clues from the memories. List items ONLY in the order they appear.
-- For TEMPORAL questions, look for dates, timestamps, or relative time references in the memories.
-- If you truly cannot find the answer, say "I don't have enough information to answer this question."
+- Answer based on the MOST RELEVANT memories. If you see a clear answer, provide it confidently.
+- Only say "I don't have enough information" if the memories contain NOTHING related to the question.
+- If memories contain partial information, answer with what you have rather than abstaining.
+- For EVENT ORDERING questions, extract timestamps or explicit ordering clues from the memories.
+- For TEMPORAL questions, look for dates, timestamps, or relative time references.
+- If there are contradictions, mention both possibilities.
 
-Be concise but thorough. Include specific quotes or details from the memories to support your answer."""
+Be concise but thorough. Include specific details from the memories to support your answer."""
 
 DEFAULT_TOP_K = 30  # Memories to retrieve per question (increased for broader context)
 RECENT_CONTEXT_COUNT = 12  # Last N messages to include as recent context
