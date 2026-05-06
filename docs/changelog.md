@@ -4,6 +4,15 @@ See [CHANGELOG.md](../CHANGELOG.md) in the repository root for the full version 
 
 ## Recent Releases
 
+### 2.1 — BEAM SOTA Benchmark (May 2026)
+
+- **Benchmark:** Full BEAM evaluation against ICLR 2026 dataset (Tavakoli et al.)
+- **Retrieval SOTA:** 35ms latency at 10M tokens, 7.2 MB storage, 9.4x compression
+- **End-to-end:** 26.9% at 100K, 19.0% at 1M (rubric-based LLM-as-judge)
+- **Abstention:** 100% accuracy on unanswerable questions
+- **Pipeline:** Multi-strategy recall, LLM reranking, full-context mode
+- See: [docs/beam-benchmark.md](docs/beam-benchmark.md)
+
 ### 2.0
 
 - **Add:** Entity extraction with Levenshtein fuzzy matching (Phase 1)
