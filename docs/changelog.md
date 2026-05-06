@@ -6,10 +6,10 @@ See [CHANGELOG.md](../CHANGELOG.md) in the repository root for the full version 
 
 ### 2.1 — BEAM Benchmark (May 2026)
 
-- **Benchmark:** Preliminary BEAM evaluation against ICLR 2026 dataset (Tavakoli et al.)
-- **End-to-end:** 26.9% at 100K, 19.0% at 1M (rubric-based LLM-as-judge, 16 questions)
-- **Pipeline:** Multi-strategy recall, LLM reranking, full-context mode
-- **Note:** Full-scale evaluation pending. Episodic consolidation needs fixes.
+- **Benchmark:** End-to-end BEAM evaluation against ICLR 2026 dataset (Tavakoli et al.)
+- **End-to-end:** 35.4% at 100K (competitive with RAG/LIGHT), 19.3% at 500K, 19.2% at 1M
+- **Pipeline:** LLM answering + LLM-as-judge rubric scoring, matching paper protocol
+- **Known issues:** Episodic consolidation not producing entries. Performance degrades at scale.
 - See: [docs/beam-benchmark.md](docs/beam-benchmark.md)
 
 ### 2.0

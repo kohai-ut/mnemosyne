@@ -15,18 +15,22 @@ Mnemosyne is a local-first memory system for the [Hermes Agent](https://github.c
 
 ## BEAM Benchmark (ICLR 2026)
 
-Mnemosyne is evaluated on the [BEAM](https://github.com/mohammadtavakoli78/BEAM) long-context memory benchmark (Tavakoli et al., ICLR 2026) using the official end-to-end protocol: retrieved memories feed into an LLM, answers are scored by an LLM-as-judge.
+Mnemosyne is evaluated on the [BEAM](https://github.com/mohammadtavakoli78/BEAM) long-context memory benchmark (Tavakoli et al., ICLR 2026) using the official end-to-end protocol: retrieved memories feed into an LLM, answers are scored by an LLM-as-judge against pre-written rubrics.
 
-**Preliminary end-to-end results** (16 questions, 2 per ability, 1 conversation per scale):
+**End-to-end results** (48 questions per scale, 3 conversations each, 180 total):
 
-| Scale | E2E QA Score | Published Baselines (10M) |
-|-------|-------------|---------------------------|
-| 100K | 26.9% | Hindsight: 64.1% |
-| 1M | 19.0% | Honcho: 40.6% |
-| | | LIGHT: 26.6% |
-| | | RAG: 24.9% |
+| Scale | Mnemosyne | RAG (Llama-4) | LIGHT | Honcho | Hindsight |
+|-------|-----------|---------------|-------|--------|-----------|
+| 100K | **35.4%** | 32.3% | 35.8% | 63.0% | 73.4% |
+| 500K | 19.3% | 33.0% | 35.9% | 64.9% | 71.1% |
+| 1M | 19.2% | 30.7% | 33.6% | 63.1% | 73.9% |
 
-**Status**: These are proof-of-concept results on minimal sample sizes. The benchmark infrastructure is built but full-scale evaluation (all 100 conversations, all 2,000 questions) is pending. Performance at 100K is roughly RAG-tier; degradation at 1M suggests the episodic consolidation pipeline needs tuning.
+**What this says:**
+- At 100K (small conversations), Mnemosyne is competitive -- beats RAG, ties LIGHT
+- At 500K+, performance degrades significantly below RAG. This is a known issue: the episodic consolidation pipeline is not producing entries during benchmark ingestion, so retrieval at scale loses information
+- Published baselines use identical BEAM dataset and LLM-as-judge protocol
+
+**Per-ability highlight (100K):** Information Extraction 80.5%, Abstention 50%, Summarization 41.7%. Multi-hop Reasoning (16.7%) and Event Ordering (13.3%) are weak -- these require fact linking across distant messages, which needs the episodic tier.
 
 Full benchmark report: [docs/beam-benchmark.md](docs/beam-benchmark.md)
 
