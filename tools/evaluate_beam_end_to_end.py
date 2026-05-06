@@ -431,12 +431,13 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         # Episodic consolidation per batch
         try:
             cursor = beam.conn.cursor()
+            # Get ALL working memory items for this session (oldest first)
             cursor.execute("""
                 SELECT id, content FROM working_memory
                 WHERE session_id = ?
                 ORDER BY timestamp ASC
-                LIMIT ?
-            """, (beam.session_id, min(len(batch_items), 500)))
+                LIMIT 1000
+            """, (beam.session_id,))
             wm_rows = cursor.fetchall()
 
             if wm_rows:
@@ -454,6 +455,12 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
                     scope="global",
                 )
                 stats["ep_count"] += 1
+                
+                # Delete consolidated items from working memory to prevent bloat
+                placeholders = ",".join("?" * len(wm_ids))
+                cursor.execute(f"DELETE FROM working_memory WHERE id IN ({placeholders})", wm_ids)
+                stats["wm_count"] -= len(wm_ids)
+                
                 beam.conn.commit()
         except Exception:
             pass
