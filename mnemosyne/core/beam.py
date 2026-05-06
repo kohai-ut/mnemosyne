@@ -319,6 +319,54 @@ def init_beam(db_path: Path = None):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_author ON episodic_memory(author_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_channel ON episodic_memory(channel_id)")
 
+    # --- FACTS (LLM-extracted structured knowledge) ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS facts (
+            fact_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL,
+            timestamp TEXT,
+            source_msg_id TEXT,
+            confidence REAL DEFAULT 1.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_facts_session ON facts(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_msg_id)")
+
+    # FTS5 for full-text search on facts
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
+            subject, predicate, object, content='facts'
+        )
+    """)
+    # Triggers to keep FTS5 in sync
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+            INSERT INTO fts_facts(rowid, subject, predicate, object)
+            VALUES (new.rowid, new.subject, new.predicate, new.object);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+            INSERT INTO fts_facts(fts_facts, rowid, subject, predicate, object)
+            VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
+        END
+    """)
+
+    # Vector table for facts (sqlite-vec)
+    try:
+        cursor.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
+                embedding {effective_vec_type}[{EMBEDDING_DIM}]
+            )
+        """)
+    except (sqlite3.OperationalError, RuntimeError):
+        pass  # sqlite-vec not available
+
 
 def _generate_id(content: str) -> str:
     return hashlib.sha256(f"{content}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
