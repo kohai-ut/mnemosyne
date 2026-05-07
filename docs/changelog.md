@@ -4,7 +4,7 @@ See [CHANGELOG.md](../CHANGELOG.md) in the repository root for the full version 
 
 ## Recent Releases
 
-### 2.4 — Hindsight Importer (May 2026)
+### 2.4 — Hindsight Importer + Host LLM Adapter (May 2026)
 
 - **Import FROM Hindsight:** New `HindsightImporter` for migrating Hindsight memories into Mnemosyne
 - **Dual input:** JSON export files OR live Hindsight HTTP API (`/v1/default/banks/{bank}/memories/list`)
@@ -12,10 +12,20 @@ See [CHANGELOG.md](../CHANGELOG.md) in the repository root for the full version 
 - **Stable IDs:** SHA256-based deduplication with `hs_` prefix — re-importing is idempotent
 - **Smart importance:** Derived from Hindsight `fact_type` (world=0.75, experience=0.65, observation=0.55) plus `proof_count` bonus
 - **Full metadata preservation:** hindsight_id, fact_type, context, dates, entities, chunk_id, tags, consolidation timestamps
-- **CLI:** `mnemosyne import-hindsight <file.json|url> [bank]`
+- **CLI:** `mnemosyne import-hindsight <file|url> [bank]`
 - **Registry:** Registered as the 7th supported provider alongside Mem0, Letta, Zep, Cognee, Honcho, SuperMemory
 - **Tests:** 102 lines of regression tests covering timestamp preservation, episodic-only import, duplicate skipping, FTS indexing, provider-registry usage
 - **Why:** Before this, migrating from Hindsight went through `remember()` which assigned current timestamps and wrote to working memory. Historical context was lost. Now migrations preserve the full temporal record with zero data loss.
+
+- **Host LLM Adapter:** Route consolidation and fact extraction through Hermes' authenticated auxiliary client
+- **OAuth unblock:** Hermes users on ChatGPT/Codex subscriptions can now use LLM-backed memory ops without `MNEMOSYNE_LLM_BASE_URL`
+- **LLMBackend Protocol:** Tiny one-method interface (`complete()`) in `mnemosyne/core/llm_backends.py` — any host can register a backend
+- **HermesAuxLLMBackend:** Routes through `agent.auxiliary_client.call_llm(task="compression", ...)` with lazy imports
+- **Host-skips-remote rule (A3):** When host attempt fails, remote URL is skipped — falls to local GGUF. Prevents stale URL leaks.
+- **Daemon thread safety:** `on_session_end()` runs sleep with 15s join; `shutdown()` drains 2s before unregistering backend
+- **Temperature contracts:** Extraction uses `0.0` (deterministic), consolidation uses `0.3` (paraphrasing acceptable)
+- **Tests:** 7 new tests covering registry round-trip, precedence, A3 rule, gate semantics, shutdown drain, bullet-list parsing
+- **Live verified:** End-to-end with `openai-codex` OAuth through ChatGPT backend
 
 ### 2.1 — BEAM Benchmark (May 2026)
 

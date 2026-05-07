@@ -501,6 +501,72 @@ mnemosyne mcp --bank project_a
 
 ---
 
+## LLM Backends (Host Adapter)
+
+**Module:** `mnemosyne.core.llm_backends`
+
+Mnemosyne can route LLM-backed operations (consolidation and fact extraction) through a host-provided backend instead of its own remote/local chain. This is used when Mnemosyne runs inside Hermes to reuse Hermes' authenticated provider (including OAuth-backed providers like ChatGPT/Codex).
+
+### LLMBackend Protocol
+
+```python
+from mnemosyne.core.llm_backends import LLMBackend, set_host_llm_backend
+
+class MyBackend:
+    name = "my-backend"
+
+    def complete(self, prompt, *, max_tokens, temperature, timeout,
+                 provider=None, model=None):
+        # Route through your authenticated client
+        return text_or_none
+
+set_host_llm_backend(MyBackend())
+```
+
+### Registry API
+
+```python
+from mnemosyne.core.llm_backends import (
+    set_host_llm_backend,
+    get_host_llm_backend,
+    call_host_llm,
+    CallableLLMBackend,
+)
+
+# Register a backend
+set_host_llm_backend(CallableLLMBackend(name="test", func=my_func))
+
+# Check if registered
+backend = get_host_llm_backend()
+
+# Call with automatic fallback
+result = call_host_llm(prompt, max_tokens=256, temperature=0.3, timeout=15.0)
+```
+
+### Fallback Chain
+
+When `MNEMOSYNE_HOST_LLM_ENABLED=true`:
+
+```text
+0. Host backend (if registered)
+   ↓ on failure: skip remote URL entirely (A3 rule)
+1. Local GGUF (ctransformers / llama-cpp-python)
+   ↓ on failure
+2. Return None / [] — caller falls back to AAAK encoding
+```
+
+When `MNEMOSYNE_HOST_LLM_ENABLED=false` or unset:
+
+```text
+0. Remote OpenAI-compatible API (if MNEMOSYNE_LLM_BASE_URL set)
+   ↓ on failure
+1. Local GGUF
+   ↓ on failure
+2. AAAK encoding
+```
+
+---
+
 ## Importers
 
 **Module:** `mnemosyne.core.importers`
