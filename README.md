@@ -5,7 +5,7 @@
 > Native, zero-cloud memory for AI agents. SQLite-backed. Sub-millisecond. Fully private.
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
-[![PyPI](https://img.shields.io/pypi/v/mnemosyne-memory.svg?v=2.3)](https://pypi.org/project/mnemosyne-memory/)
+[![PyPI](https://img.shields.io/pypi/v/mnemosyne-memory.svg?v=2.4)](https://pypi.org/project/mnemosyne-memory/)
 [![SQLite](https://img.shields.io/badge/SQLite-3.35+-green.svg)](https://sqlite.org/codeofethics.html)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/AxDSan/mnemosyne/actions/workflows/ci.yml/badge.svg)](https://github.com/AxDSan/mnemosyne/actions/workflows/ci.yml)
@@ -121,13 +121,14 @@ hermes mnemosyne stats     # Shows working + episodic memory counts
 | **Auth required** | **None** | Supabase auth | OAuth / API key | API key |
 | **Rate limits** | **None -- unlimited** | Yes (plan-dependent) | Yes (credit-based) | Yes (plan-dependent) |
 | **Data ownership** | **You own the SQLite file** | Vendor-hosted | Vendor-hosted | Vendor-hosted |
-| **Export / import** | **One JSON file, any machine** | Limited | Limited | Limited |
-| **Dependencies** | **Python stdlib + optional ONNX** | Docker, PostgreSQL, network | Docker, PostgreSQL, network | pip + API key + network |
-| **Integration** | **Native Hermes plugin** | REST API SDK | REST API SDK | REST API SDK |
-| **Memory architecture** | **BEAM (3-tier: working + episodic + scratchpad)** | Session + facts | Graph RAG + facts | Session + facts |
-| **Auto-consolidation** | **Sleep cycles built-in** | Manual / paid add-on | Manual | Manual |
-| **Temporal knowledge graph** | **Native triples with validity** | No | No | No |
-| **Benchmark (LongMemEval)** | **98.9% Recall@All@5** | Not published | Not published | Not published |
+| **Export / import** | **One JSON file, any machine** | Limited | Limited | Limited | Limited |
+| **Dependencies** | **Python stdlib + optional ONNX** | Docker, PostgreSQL, network | Docker, PostgreSQL, network | pip + API key + network | pip + API key + network |
+| **Integration** | **Native Hermes plugin** | REST API SDK | REST API SDK | REST API SDK | REST API SDK |
+| **Memory architecture** | **BEAM (3-tier: working + episodic + scratchpad)** | Session + facts | Graph RAG + facts | Session + facts | Retain/Recall/Reflect |
+| **Auto-consolidation** | **Sleep cycles built-in** | Manual / paid add-on | Manual | Manual | Reflect loop |
+| **Temporal knowledge graph** | **Native triples with validity** | No | No | No | Native graph + temporal |
+| **Import from other systems** | **7 providers (Mem0, Letta, Zep, Cognee, Honcho, SuperMemory, Hindsight)** | No | No | No | No |
+| **Benchmark (LongMemEval)** | **98.9% Recall@All@5** | Not published | Not published | Not published | Not published |
 
 ### What You Gain Switching to Mnemosyne
 
@@ -136,7 +137,7 @@ hermes mnemosyne stats     # Shows working + episodic memory counts
 | **Honcho** | 500x faster reads, zero monthly bill, 100% offline, no Docker, no credit system | Cloud-hosted dashboard, managed scaling, team sharing features |
 | **Zep** | 43x faster search, no PostgreSQL to maintain, no deployment overhead, instant cold start | Graph RAG visualization, enterprise compliance certs (SOC 2), managed BYOC |
 | **Mem0** | Sub-millisecond everything, no API rate limits, no vendor lock-in, full data portability | Managed platform features, 90K+ developer community, YC-backed ecosystem |
-| **Hindsight** | Zero dependency, no network calls, SQLite-native, BEAM architecture | Cloud sync across devices, managed inference, web dashboard |
+| **Hindsight** | Zero dependency, no network calls, SQLite-native, BEAM architecture, **can import FROM Hindsight** | Cloud sync across devices, managed inference, web dashboard |
 
 ### The Bottom Line
 
@@ -160,6 +161,7 @@ hermes mnemosyne stats     # Shows working + episodic memory counts
 - **MCP server** -- 6 tools, stdio + SSE transports
 - **Temporal recall** -- Exponential decay scoring with configurable halflife
 - **Export / import** -- Move your entire memory database to a new machine with one JSON file
+- **Cross-provider importers** -- Migrate from Mem0, Letta, Zep, Cognee, Honcho, SuperMemory, **Hindsight**
 - **Cross-session scope** -- `remember(..., scope="global")` makes facts visible everywhere
 - **Configurable compression** -- `int8` (default), `float32`, or `bit` (32x smaller) vectors
 
@@ -313,6 +315,10 @@ hermes mnemosyne export --output mnemosyne_backup.json
 
 # Import memories from a JSON file
 hermes mnemosyne import --input mnemosyne_backup.json
+
+# Import from Hindsight (JSON export or live API)
+hermes mnemosyne import --from hindsight --file hindsight-export.json --bank hermes
+hermes mnemosyne import --from hindsight --base-url http://localhost:8888 --bank hermes
 
 # Clear scratchpad
 hermes mnemosyne clear
@@ -550,6 +556,10 @@ hermes mnemosyne import --from letta --agent-file-path ./agent.af
 # Zep → Mnemosyne
 hermes mnemosyne import --from zep --api-key sk-xxx --max-sessions 100
 
+# Hindsight → Mnemosyne (JSON export or live API)
+hermes mnemosyne import --from hindsight --file hindsight-export.json --bank hermes
+hermes mnemosyne import --from hindsight --base-url http://localhost:8888 --bank hermes
+
 # Generate a migration script for any provider
 hermes mnemosyne import --from mem0 --generate-script --output-script migrate.py
 
@@ -557,7 +567,7 @@ hermes mnemosyne import --from mem0 --generate-script --output-script migrate.py
 hermes mnemosyne import --from zep --agentic
 ```
 
-**Supported providers:** Mem0, Letta (MemGPT), Zep, Cognee, Honcho, SuperMemory
+**Supported providers:** Mem0, Letta (MemGPT), Zep, Cognee, Honcho, SuperMemory, **Hindsight**
 
 All importers preserve metadata, timestamps, user/agent identity, and relationships (graph edges → triples). Use `--dry-run` to validate without writing.
 

@@ -4,6 +4,19 @@ See [CHANGELOG.md](../CHANGELOG.md) in the repository root for the full version 
 
 ## Recent Releases
 
+### 2.4 — Hindsight Importer (May 2026)
+
+- **Import FROM Hindsight:** New `HindsightImporter` for migrating Hindsight memories into Mnemosyne
+- **Dual input:** JSON export files OR live Hindsight HTTP API (`/v1/default/banks/{bank}/memories/list`)
+- **Episodic-direct:** Writes to `episodic_memory` (not working memory), preserving original timestamps, fact types, session IDs, metadata, scope, and veracity
+- **Stable IDs:** SHA256-based deduplication with `hs_` prefix — re-importing is idempotent
+- **Smart importance:** Derived from Hindsight `fact_type` (world=0.75, experience=0.65, observation=0.55) plus `proof_count` bonus
+- **Full metadata preservation:** hindsight_id, fact_type, context, dates, entities, chunk_id, tags, consolidation timestamps
+- **CLI:** `mnemosyne import-hindsight <file.json|url> [bank]`
+- **Registry:** Registered as the 7th supported provider alongside Mem0, Letta, Zep, Cognee, Honcho, SuperMemory
+- **Tests:** 102 lines of regression tests covering timestamp preservation, episodic-only import, duplicate skipping, FTS indexing, provider-registry usage
+- **Why:** Before this, migrating from Hindsight went through `remember()` which assigned current timestamps and wrote to working memory. Historical context was lost. Now migrations preserve the full temporal record with zero data loss.
+
 ### 2.1 — BEAM Benchmark (May 2026)
 
 - **Benchmark:** End-to-end BEAM evaluation against ICLR 2026 dataset (Tavakoli et al.)

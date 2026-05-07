@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Simple Versioning](https://github.com/AxDSan/mnemosyne) (MAJOR.MINOR).
 
+## [2.4] — 2026-05-07
+
+### Added
+
+**Hindsight Importer — migrate FROM Hindsight INTO Mnemosyne**
+- New `HindsightImporter` class in `mnemosyne/core/importers/hindsight.py`
+- Import from Hindsight JSON exports OR live Hindsight HTTP API (`/v1/default/banks/{bank}/memories/list`)
+- Writes directly to `episodic_memory` (not working memory) — preserves original timestamps, fact types, session grouping, metadata, scope, and veracity
+- Stable duplicate skipping via SHA256-based IDs (`hs_` prefix)
+- Importance scoring derived from Hindsight `fact_type` (world=0.75, experience=0.65, observation=0.55) + proof_count bonus
+- Full metadata preservation: hindsight_id, fact_type, context, dates, entities, chunk_id, tags, consolidation timestamps
+- CLI: `mnemosyne import-hindsight <file.json|url> [bank]`
+- Registered in provider registry alongside Mem0, Letta, Zep, Cognee, Honcho, SuperMemory
+- 102 lines of regression tests: timestamp preservation, episodic-only import, stable duplicate skipping, FTS indexing, provider-registry usage
+
+### Why this matters
+
+Before this importer, migrating FROM Hindsight required going through `remember()`, which assigned current timestamps and wrote to working memory. Historical memories lost their original context. Now Hindsight migrations preserve the full temporal record with zero data loss.
+
+---
+
 ## [2.3.1] — 2026-05-06
 
 ### Fixed
@@ -362,6 +383,7 @@ and this project adheres to [Simple Versioning](https://github.com/AxDSan/mnemos
 - **Hermes plugin registration** — basic tool integration
 - **AAAK compression** — early context compression for token limits
 
+[2.4]: https://github.com/AxDSan/mnemosyne/releases/tag/v2.4
 [2.0]: https://github.com/AxDSan/mnemosyne/releases/tag/v2.0
 [1.13]: https://github.com/AxDSan/mnemosyne/releases/tag/v1.13
 [1.0]: https://github.com/AxDSan/mnemosyne/releases/tag/v1.0

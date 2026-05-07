@@ -1,4 +1,4 @@
-# API Reference — Mnemosyne v2.1
+# API Reference — Mnemosyne v2.4
 
 ## Quick Start
 
@@ -501,6 +501,80 @@ mnemosyne mcp --bank project_a
 
 ---
 
+## Importers
+
+**Module:** `mnemosyne.core.importers`
+
+Mnemosyne can import memories from 7 external providers. All importers preserve metadata, timestamps, and identity.
+
+### Supported Providers
+
+| Provider | Class | Input | Key Preservation |
+|---|---|---|---|
+| **Mem0** | `Mem0Importer` | API key + user ID | User/app scoping |
+| **Letta** | `LettaImporter` | AgentFile `.af` | Memory blocks, messages |
+| **Zep** | `ZepImporter` | API key | Sessions, summaries, facts |
+| **Cognee** | `CogneeImporter` | Graph data | Nodes → memories, edges → triples |
+| **Honcho** | `HonchoImporter` | API key | Peer identity as author_id |
+| **SuperMemory** | `SuperMemoryImporter` | API key | Container tags → channel_id |
+| **Hindsight** | `HindsightImporter` | JSON file or HTTP API | **Timestamps, fact_type, session IDs, metadata, veracity** |
+
+### HindsightImporter
+
+**Special behavior:** Unlike other importers that route through `remember()`, HindsightImporter writes directly to `episodic_memory`. This preserves historical timestamps and avoids working-memory session contamination.
+
+```python
+from mnemosyne.core.importers import HindsightImporter
+
+# From JSON export
+importer = HindsightImporter(file_path="hindsight-export.json", bank="hermes")
+result = importer.run(mnemosyne)
+
+# From live API
+importer = HindsightImporter(base_url="http://localhost:8888", bank="hermes")
+result = importer.run(mnemosyne)
+
+# Convenience wrapper
+from mnemosyne.core.importers import import_from_hindsight
+result = import_from_hindsight(mnemosyne, file_path="export.json", bank="hermes")
+```
+
+**Parameters:**
+- `file_path` — Path to Hindsight JSON export file
+- `base_url` — Base URL of running Hindsight API (e.g., `http://localhost:8888`)
+- `bank` — Hindsight bank name (default: `hermes`)
+- `page_size` — API pagination size, 1–1000 (default: 500)
+- `max_items` — Maximum memories to import (default: unlimited)
+- `namespace` — ID namespace for stable hashing (default: bank name)
+
+**Result object:**
+```python
+result.provider      # "hindsight"
+result.total         # Total items found
+result.imported      # Successfully inserted
+result.skipped       # Duplicates or empty content
+result.failed        # Insertion errors
+result.memory_ids    # List of imported memory IDs
+result.errors        # List of error strings
+result.started_at    # ISO timestamp
+result.finished_at   # ISO timestamp
+```
+
+### Provider Registry
+
+```python
+from mnemosyne.core.importers import import_from_provider, PROVIDER_REGISTRY
+
+# See all supported providers
+print(PROVIDER_REGISTRY.keys())
+# dict_keys(['mem0', 'letta', 'zep', 'cognee', 'honcho', 'supermemory', 'hindsight'])
+
+# Generic import dispatcher
+result = import_from_provider("hindsight", mnemosyne, file_path="export.json")
+```
+
+---
+
 ## CLI
 
 ```bash
@@ -512,6 +586,8 @@ mnemosyne stats
 mnemosyne sleep
 mnemosyne export backup.json
 mnemosyne import backup.json
+mnemosyne import-hindsight export.json [bank]      # Import Hindsight JSON
+mnemosyne import-hindsight http://localhost:8888    # Import from live API
 mnemosyne bank list
 mnemosyne bank create work
 mnemosyne bank delete work

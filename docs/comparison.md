@@ -1,6 +1,6 @@
 # Mnemosyne vs Hindsight Self-Hosted
 
-**Last updated:** 2026-05-02 · Mnemosyne v2.1
+**Last updated:** 2026-05-07 · Mnemosyne v2.4
 
 This is an honest, technical comparison between Mnemosyne and Hindsight self-hosted (local Docker, not the managed Cloud product). Every claim below is grounded in source code — no fabricated benchmarks or aspirational APIs.
 
@@ -261,7 +261,7 @@ Both systems are fully offline after initial setup. The difference is weight: Mn
 | Gap | Severity | Workaround |
 |---|---|---|
 | No automatic entity normalization | Medium | `extract_entities=True` captures entities; fuzzy matching helps but doesn't resolve coreference |
-| No cross-machine network API | Medium for multi-agent setups | Export/import JSON; same-machine sharing via shared SQLite file |
+| No cross-machine network API | Medium for multi-agent setups | Export/import JSON; same-machine sharing via shared SQLite file. **Can now import FROM Hindsight directly** — migrate without data loss |
 | No cross-encoder reranking | Low for most queries | Hybrid scoring with configurable weights covers common cases |
 | No automatic conflict detection | Medium | Manual `invalidate(memory_id, replacement_id=new_id)` |
 | No multi-tenancy / access control | High for SaaS use cases | Use per-bank SQLite isolation for domain separation |
