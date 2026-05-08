@@ -48,26 +48,6 @@ def run_cli(args, tmp_path):
     )
 
 
-def test_invalid_cli_input_reports_error_without_traceback(tmp_path):
-    for args, expected_error in COMMANDS:
-        result = run_cli(args, tmp_path)
-
-        assert result.returncode != 0, args
-        assert expected_error in result.stderr, result.stderr
-        assert "Traceback" not in result.stderr
-
-
-def test_import_malformed_json_reports_error_without_traceback(tmp_path):
-    bad_json = tmp_path / "bad.json"
-    bad_json.write_text("{not valid json", encoding="utf-8")
-
-    result = run_cli(["import", str(bad_json)], tmp_path)
-
-    assert result.returncode != 0
-    assert "Invalid JSON" in result.stderr
-    assert "Traceback" not in result.stderr
-
-
 def test_missing_required_args_report_usage_error_without_traceback(tmp_path):
     for args, expected_usage in USAGE_COMMANDS:
         result = run_cli(args, tmp_path)
@@ -93,4 +73,24 @@ def test_help_exits_successfully(tmp_path):
 
     assert result.returncode == 0
     assert "Usage: mnemosyne <command> [args]" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_invalid_cli_input_reports_error_without_traceback(tmp_path):
+    for args, expected_error in COMMANDS:
+        result = run_cli(args, tmp_path)
+
+        assert result.returncode != 0, args
+        assert expected_error in result.stderr, result.stderr
+        assert "Traceback" not in result.stderr
+
+
+def test_import_malformed_json_reports_error_without_traceback(tmp_path):
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{not valid json", encoding="utf-8")
+
+    result = run_cli(["import", str(bad_json)], tmp_path)
+
+    assert result.returncode != 0
+    assert "Invalid JSON" in result.stderr
     assert "Traceback" not in result.stderr
