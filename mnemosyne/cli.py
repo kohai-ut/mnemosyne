@@ -26,6 +26,12 @@ def _fail(message: str, exit_code: int = 2) -> NoReturn:
     raise SystemExit(exit_code)
 
 
+def _usage(message: str, exit_code: int = 2) -> NoReturn:
+    """Print command usage for invalid invocations and exit."""
+    print(message, file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
 def _parse_float(value: str, name: str) -> float:
     """Parse a float argument or exit with a user-facing CLI error."""
     try:
@@ -51,8 +57,7 @@ def _get_memory():
 def cmd_store(args):
     """Store a new memory."""
     if not args:
-        print("Usage: mnemosyne store <content> [source] [importance]")
-        return
+        _usage("Usage: mnemosyne store <content> [source] [importance]")
     content = args[0]
     source = args[1] if len(args) > 1 else "cli"
     importance = _parse_float(args[2], "importance") if len(args) > 2 else 0.5
@@ -70,8 +75,7 @@ def cmd_store(args):
 def cmd_recall(args):
     """Search memories."""
     if not args:
-        print("Usage: mnemosyne recall <query> [top_k]")
-        return
+        _usage("Usage: mnemosyne recall <query> [top_k]")
     query = args[0]
     top_k = _parse_int(args[1], "top_k") if len(args) > 1 else 5
 
@@ -92,8 +96,7 @@ def cmd_recall(args):
 def cmd_update(args):
     """Update an existing memory."""
     if len(args) < 2:
-        print("Usage: mnemosyne update <memory_id> <new_content> [importance]")
-        return
+        _usage("Usage: mnemosyne update <memory_id> <new_content> [importance]")
     memory_id = args[0]
     content = args[1]
     importance = _parse_float(args[2], "importance") if len(args) > 2 else None
@@ -109,8 +112,7 @@ def cmd_update(args):
 def cmd_delete(args):
     """Delete a memory."""
     if not args:
-        print("Usage: mnemosyne delete <memory_id>")
-        return
+        _usage("Usage: mnemosyne delete <memory_id>")
     memory_id = args[0]
 
     mem = _get_memory()
@@ -174,8 +176,7 @@ def cmd_export(args):
 def cmd_import(args):
     """Import memories from JSON."""
     if not args:
-        print("Usage: mnemosyne import <file.json>")
-        return
+        _usage("Usage: mnemosyne import <file.json>")
     mem = _get_memory()
     try:
         result = mem.import_from_file(args[0])
@@ -191,8 +192,7 @@ def cmd_import(args):
 def cmd_import_hindsight(args):
     """Import memories from a Hindsight JSON export or API."""
     if not args:
-        print("Usage: mnemosyne import-hindsight <file.json|base_url> [bank]")
-        return
+        _usage("Usage: mnemosyne import-hindsight <file.json|base_url> [bank]")
     target = args[0]
     bank = args[1] if len(args) > 1 else "hermes"
     mem = _get_memory()
@@ -217,8 +217,7 @@ def cmd_mcp(args):
 def cmd_bank(args):
     """Manage memory banks."""
     if not args:
-        print("Usage: mnemosyne bank <list|create|delete> [name]")
-        return
+        _usage("Usage: mnemosyne bank <list|create|delete> [name]")
 
     from mnemosyne.core.banks import BankManager
     bm = BankManager(db_path=os.path.join(DATA_DIR, "mnemosyne.db"))
@@ -292,8 +291,9 @@ def run_cli():
     if handler:
         handler(sys.argv[2:])
     else:
-        print(f"Unknown command: {command}")
-        print("Run 'mnemosyne --help' for usage.")
+        print(f"Unknown command: {command}", file=sys.stderr)
+        print("Run 'mnemosyne --help' for usage.", file=sys.stderr)
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
