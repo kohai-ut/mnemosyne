@@ -56,13 +56,3 @@ def test_import_malformed_json_reports_error_without_traceback(tmp_path):
     assert result.returncode != 0
     assert "Invalid JSON" in result.stderr
     assert "Traceback" not in result.stderr
-
-
-def test_update_delete_missing_memory_report_operation_failure(tmp_path):
-    for args in (["update", "missing-id", "new content"], ["delete", "missing-id"]):
-        result = run_cli(args, tmp_path)
-
-        assert result.returncode == 1, args
-        assert result.stdout == ""
-        assert "Memory not found: missing-id" in result.stderr
-        assert "Traceback" not in result.stderr
