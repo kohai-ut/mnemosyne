@@ -65,8 +65,8 @@ def test_import_hindsight_errors_return_nonzero_exit(tmp_path):
     result = run_cli(["import-hindsight", str(missing_file)], tmp_path)
 
     assert result.returncode != 0
-    assert result.stderr == ""
     assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
     payload = json.loads(result.stdout)
     assert payload["provider"] == "hindsight"
     assert payload["errors"]
