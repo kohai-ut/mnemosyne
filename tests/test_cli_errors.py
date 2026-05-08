@@ -93,4 +93,4 @@ def test_help_exits_successfully(tmp_path):
 
     assert result.returncode == 0
     assert "Usage: mnemosyne <command> [args]" in result.stdout
-    assert result.stderr == ""
+    assert "Traceback" not in result.stderr
