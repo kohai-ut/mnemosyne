@@ -56,3 +56,32 @@ def test_import_malformed_json_reports_error_without_traceback(tmp_path):
     assert result.returncode != 0
     assert "Invalid JSON" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_bank_cli_list_create_delete_uses_configured_data_dir(tmp_path):
+    result = run_cli(["bank", "list"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "default" in result.stdout
+    assert "Traceback" not in result.stderr
+
+    result = run_cli(["bank", "create", "project_a"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Created bank: project_a" in result.stdout
+    assert "Traceback" not in result.stderr
+
+    result = run_cli(["bank", "list"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "project_a" in result.stdout
+
+    result = run_cli(["bank", "delete", "project_a"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Deleted bank: project_a" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_bank_cli_validation_errors_are_user_facing(tmp_path):
+    result = run_cli(["bank", "create", "bad/name"], tmp_path)
+
+    assert result.returncode != 0
+    assert "Invalid bank name" in result.stderr
+    assert "Traceback" not in result.stderr

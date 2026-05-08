@@ -221,28 +221,33 @@ def cmd_bank(args):
         return
 
     from mnemosyne.core.banks import BankManager
-    bm = BankManager(db_path=os.path.join(DATA_DIR, "mnemosyne.db"))
+    bm = BankManager(Path(DATA_DIR))
 
     subcmd = args[0]
-    if subcmd == "list":
-        banks = bm.list_banks()
-        print("\nMemory Banks:\n")
-        for b in banks:
-            print(f"  - {b}")
-    elif subcmd == "create":
-        if len(args) < 2:
-            print("Usage: mnemosyne bank create <name>")
-            return
-        bm.create_bank(args[1])
-        print(f"Created bank: {args[1]}")
-    elif subcmd == "delete":
-        if len(args) < 2:
-            print("Usage: mnemosyne bank delete <name>")
-            return
-        bm.delete_bank(args[1])
-        print(f"Deleted bank: {args[1]}")
-    else:
-        print(f"Unknown bank command: {subcmd}")
+    try:
+        if subcmd == "list":
+            banks = bm.list_banks()
+            print("\nMemory Banks:\n")
+            for b in banks:
+                print(f"  - {b}")
+        elif subcmd == "create":
+            if len(args) < 2:
+                print("Usage: mnemosyne bank create <name>")
+                return
+            bm.create_bank(args[1])
+            print(f"Created bank: {args[1]}")
+        elif subcmd == "delete":
+            if len(args) < 2:
+                print("Usage: mnemosyne bank delete <name>")
+                return
+            if bm.delete_bank(args[1]):
+                print(f"Deleted bank: {args[1]}")
+            else:
+                print(f"Bank not found: {args[1]}")
+        else:
+            print(f"Unknown bank command: {subcmd}")
+    except ValueError as e:
+        _fail(str(e))
 
 
 COMMANDS = {
