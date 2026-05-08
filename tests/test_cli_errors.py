@@ -1,5 +1,6 @@
 """CLI error handling regression tests."""
 
+import json
 import os
 import subprocess
 import sys
@@ -56,3 +57,17 @@ def test_import_malformed_json_reports_error_without_traceback(tmp_path):
     assert result.returncode != 0
     assert "Invalid JSON" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_import_hindsight_errors_return_nonzero_exit(tmp_path):
+    missing_file = tmp_path / "missing-hindsight-export.json"
+
+    result = run_cli(["import-hindsight", str(missing_file)], tmp_path)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert "Traceback" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["provider"] == "hindsight"
+    assert payload["errors"]
+    assert "No such file or directory" in payload["errors"][0]
