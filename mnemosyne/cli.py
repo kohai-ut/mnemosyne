@@ -217,8 +217,7 @@ def cmd_mcp(args):
 def cmd_bank(args):
     """Manage memory banks."""
     if not args:
-        print("Usage: mnemosyne bank <list|create|delete> [name]")
-        return
+        _fail("Usage: mnemosyne bank <list|create|delete> [name]")
 
     from mnemosyne.core.banks import BankManager
     bm = BankManager(Path(DATA_DIR))
@@ -232,20 +231,18 @@ def cmd_bank(args):
                 print(f"  - {b}")
         elif subcmd == "create":
             if len(args) < 2:
-                print("Usage: mnemosyne bank create <name>")
-                return
+                _fail("Usage: mnemosyne bank create <name>")
             bm.create_bank(args[1])
             print(f"Created bank: {args[1]}")
         elif subcmd == "delete":
             if len(args) < 2:
-                print("Usage: mnemosyne bank delete <name>")
-                return
+                _fail("Usage: mnemosyne bank delete <name>")
             if bm.delete_bank(args[1]):
                 print(f"Deleted bank: {args[1]}")
             else:
-                print(f"Bank not found: {args[1]}")
+                _fail(f"Bank not found: {args[1]}", exit_code=1)
         else:
-            print(f"Unknown bank command: {subcmd}")
+            _fail(f"Unknown bank command: {subcmd}")
     except ValueError as e:
         _fail(str(e))
 
