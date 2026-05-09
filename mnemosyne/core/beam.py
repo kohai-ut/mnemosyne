@@ -24,6 +24,13 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Set, Union
 from pathlib import Path
 
+# Typed memory classification (Phase 1 — zero overhead, pattern-based)
+try:
+    from mnemosyne.core.typed_memory import classify_memory, MemoryType
+except ImportError:
+    classify_memory = None
+    MemoryType = None
+
 try:
     import numpy as np
 except ImportError:
@@ -194,6 +201,16 @@ def init_beam(db_path: Path = None):
         pass
     try:
         cursor.execute("ALTER TABLE episodic_memory ADD COLUMN veracity TEXT DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass
+
+    # --- Typed memory migration (Phase 1) ---
+    try:
+        cursor.execute("ALTER TABLE working_memory ADD COLUMN memory_type TEXT DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE episodic_memory ADD COLUMN memory_type TEXT DEFAULT 'unknown'")
     except sqlite3.OperationalError:
         pass
 
@@ -865,6 +882,15 @@ class BeamMemory:
                 and store as triples. Default False.
             veracity: Confidence level — 'stated', 'inferred', 'tool', 'imported', 'unknown'
         """
+        # --- Typed memory classification (Phase 1 — zero overhead) ---
+        memory_type = None
+        if classify_memory is not None:
+            try:
+                result = classify_memory(content)
+                memory_type = result.memory_type.value
+            except Exception:
+                pass  # Classifier failures are non-blocking
+
         # --- Deduplication: exact match ---
         existing_id = self._find_duplicate(content)
         if existing_id:
@@ -876,11 +902,13 @@ class BeamMemory:
                     scope = COALESCE(?, scope),
                     author_id = COALESCE(?, author_id),
                     author_type = COALESCE(?, author_type),
-                    channel_id = COALESCE(?, channel_id)
+                    channel_id = COALESCE(?, channel_id),
+                    memory_type = COALESCE(?, memory_type)
                 WHERE id = ? AND session_id = ?
             """, (importance, datetime.now().isoformat(), source,
                   valid_until, scope,
                   self.author_id, self.author_type, self.channel_id,
+                  memory_type,
                   existing_id, self.session_id))
             self.conn.commit()
             return existing_id
@@ -891,11 +919,11 @@ class BeamMemory:
         cursor.execute("""
             INSERT INTO working_memory
             (id, content, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-             author_id, author_type, channel_id, veracity)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             author_id, author_type, channel_id, veracity, memory_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory_id, content, source, timestamp, self.session_id, importance,
               json.dumps(metadata or {}), valid_until, scope,
-              self.author_id, self.author_type, self.channel_id, veracity))
+              self.author_id, self.author_type, self.channel_id, veracity, memory_type))
         self.conn.commit()
         self._trim_working_memory()
 
@@ -923,10 +951,18 @@ class BeamMemory:
         for item in items:
             memory_id = _generate_id(item["content"])
             ids.append(memory_id)
+            # Typed memory classification
+            item_type = None
+            if classify_memory is not None:
+                try:
+                    result = classify_memory(item["content"])
+                    item_type = result.memory_type.value
+                except Exception:
+                    pass
             cursor.execute("""
                 INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, metadata_json,
-                author_id, author_type, channel_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                author_id, author_type, channel_id, memory_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 memory_id,
                 item["content"],
@@ -937,7 +973,8 @@ class BeamMemory:
                 json.dumps(item.get("metadata") or {}),
                 item.get("author_id", self.author_id),
                 item.get("author_type", self.author_type),
-                item.get("channel_id", self.channel_id)
+                item.get("channel_id", self.channel_id),
+                item_type
             ))
         self.conn.commit()
         self._trim_working_memory()
@@ -1100,15 +1137,23 @@ class BeamMemory:
         """
         memory_id = _generate_id(summary)
         timestamp = datetime.now().isoformat()
+        # Typed memory classification
+        ep_type = None
+        if classify_memory is not None:
+            try:
+                result = classify_memory(summary)
+                ep_type = result.memory_type.value
+            except Exception:
+                pass
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO episodic_memory
             (id, content, source, timestamp, session_id, importance, metadata_json, summary_of, valid_until, scope,
-             author_id, author_type, channel_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             author_id, author_type, channel_id, memory_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory_id, summary, source, timestamp, self.session_id, importance,
               json.dumps(metadata or {}), ",".join(source_wm_ids), valid_until, scope,
-              self.author_id, self.author_type, self.channel_id))
+              self.author_id, self.author_type, self.channel_id, ep_type))
         rowid = cursor.lastrowid
 
         if _embeddings.available():
@@ -1133,6 +1178,7 @@ class BeamMemory:
                author_type: Optional[str] = None,
                channel_id: Optional[str] = None,
                veracity: Optional[str] = None,
+               memory_type: Optional[str] = None,
                temporal_weight: float = 0.0,
                query_time: Optional[Any] = None,
                temporal_halflife: Optional[float] = None,
@@ -1235,6 +1281,9 @@ class BeamMemory:
         if veracity:
             wm_where_clauses.append("veracity = ?")
             wm_params.append(veracity)
+        if memory_type:
+            wm_where_clauses.append("memory_type = ?")
+            wm_params.append(memory_type)
         if author_id:
             wm_where_clauses.append("author_id = ?")
             wm_params.append(author_id)
@@ -1251,7 +1300,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(wm_ids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1261,7 +1310,7 @@ class BeamMemory:
             # Fallback: fetch recent items and score in Python (old path)
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM working_memory
                 WHERE {wm_where}
                 ORDER BY timestamp DESC
@@ -1339,7 +1388,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(entity_memory_ids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1400,7 +1449,7 @@ class BeamMemory:
                 em_entity_params = [*tuple(entity_memory_ids), self.session_id]
             em_entity_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM episodic_memory
                 WHERE id IN ({em_placeholders})
                   AND {em_entity_scope}
@@ -1455,7 +1504,7 @@ class BeamMemory:
             cursor = self.conn.cursor()
             # Check working_memory for fact matches
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM working_memory
                 WHERE id IN ({placeholders})
                   AND {wm_where}
@@ -1513,7 +1562,7 @@ class BeamMemory:
                 fact_em_params = [*tuple(fact_memory_ids), self.session_id]
             fact_em_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
-                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity
+                SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
                 FROM episodic_memory
                 WHERE id IN ({placeholders})
                   AND {fact_em_scope}
@@ -1623,6 +1672,9 @@ class BeamMemory:
         if veracity:
             em_where_clauses.append("veracity = ?")
             em_params.append(veracity)
+        if memory_type:
+            em_where_clauses.append("memory_type = ?")
+            em_params.append(memory_type)
         if author_id:
             em_where_clauses.append("author_id = ?")
             em_params.append(author_id)
@@ -1639,7 +1691,7 @@ class BeamMemory:
             placeholders = ",".join("?" * len(episodic_rowids))
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT rowid, id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT rowid, id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, memory_type
                 FROM episodic_memory
                 WHERE rowid IN ({placeholders})
                   AND {em_where}
@@ -1683,7 +1735,7 @@ class BeamMemory:
         if not episodic_rowids:
             cursor = self.conn.cursor()
             cursor.execute(f"""
-                SELECT rowid, id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id
+                SELECT rowid, id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, memory_type
                 FROM episodic_memory
                 WHERE {em_where}
                 ORDER BY timestamp DESC
