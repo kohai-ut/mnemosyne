@@ -240,3 +240,58 @@ class TestPatternDetector:
         patterns = detector.detect_content(memories)
         # With high confidence threshold, should find nothing
         assert len(patterns) == 0
+
+
+# ─── Mnemosyne wrapper integration (C26) ────────────────────────────
+
+class TestMnemosynePatternMethods:
+    """Regression tests for [C26]: Mnemosyne.detect_patterns() and
+    summarize_patterns() called self.get_all_memories() which did not exist,
+    raising AttributeError on first invocation when no memories arg was passed.
+    """
+
+    def test_detect_patterns_no_args_does_not_raise(self, tmp_path):
+        from mnemosyne.core.memory import Mnemosyne
+        mem = Mnemosyne(session_id="c26", db_path=tmp_path / "c26.db")
+        mem.remember("Morning standup notes", source="meeting", importance=0.6)
+        mem.remember("User likes Python over Java", source="user", importance=0.7)
+        result = mem.detect_patterns()
+        assert isinstance(result, list)
+
+    def test_summarize_patterns_no_args_does_not_raise(self, tmp_path):
+        from mnemosyne.core.memory import Mnemosyne
+        mem = Mnemosyne(session_id="c26", db_path=tmp_path / "c26.db")
+        mem.remember("Morning standup notes", source="meeting", importance=0.6)
+        mem.remember("Afternoon review", source="meeting", importance=0.6)
+        summary = mem.summarize_patterns()
+        assert isinstance(summary, dict)
+        assert "total_memories" in summary
+        assert summary["total_memories"] >= 2
+
+    def test_get_all_memories_returns_working_and_episodic(self, tmp_path):
+        """get_all_memories must combine working_memory and episodic_memory rows."""
+        from mnemosyne.core.memory import Mnemosyne
+        mem = Mnemosyne(session_id="c26", db_path=tmp_path / "c26.db")
+        mem.remember("Working item one", source="user", importance=0.5)
+        mem.remember("Working item two", source="agent", importance=0.5)
+        # Manually insert an episodic row to avoid driving the full sleep path here
+        cursor = mem.beam.conn.cursor()
+        cursor.execute(
+            """INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("ep-c26-1", "Episodic summary one", "consolidation",
+             "2026-05-09T09:00:00", "c26", 0.6),
+        )
+        mem.beam.conn.commit()
+
+        rows = mem.get_all_memories()
+        assert isinstance(rows, list)
+        contents = [r["content"] for r in rows]
+        assert "Working item one" in contents
+        assert "Working item two" in contents
+        assert "Episodic summary one" in contents
+        # PatternDetector relies on these fields:
+        for r in rows:
+            assert "content" in r
+            assert "timestamp" in r
+            assert "source" in r

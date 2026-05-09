@@ -198,6 +198,27 @@ class Mnemosyne:
             memories = self.get_all_memories()
         return self.patterns.summarize_patterns(memories)
 
+    def get_all_memories(self) -> List[Dict]:
+        """Return all working + episodic rows for pattern analysis.
+
+        Scoped to the active session (and global memories) to keep results
+        meaningful for per-session pattern detection.
+        """
+        cursor = self.beam.conn.cursor()
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM working_memory
+            WHERE session_id = ? OR scope = 'global'
+        """, (self.session_id,))
+        rows = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM episodic_memory
+            WHERE session_id = ? OR scope = 'global'
+        """, (self.session_id,))
+        rows.extend(dict(row) for row in cursor.fetchall())
+        return rows
+
     # ─── Phase 8: Delta Sync ──────────────────────────────────────
 
     @property
