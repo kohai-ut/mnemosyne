@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Simple Versioning](https://github.com/AxDSan/mnemosyne) (MAJOR.MINOR).
 
+## [2.5] — 2026-05-09 — NAI-0 Algorithmic Sprint
+
+### Added
+- `BeamMemory.format_context(results, format="bullet"|"json")` — structured context formatting
+- `BeamMemory._sandwich_order()` — U-shaped attention ordering (high-first, medium-middle, high-last)
+- `BeamMemory._fact_line()` — clean one-line fact format with date, source, confidence
+- `BeamMemory._format_context_json()` / `_format_context_bullet()` — JSON and markdown output
+- RRF (Reciprocal Rank Fusion) in `PolyphonicRecallEngine._combine_voices()` with k=60 constant
+- Covering indexes: `idx_em_scope_imp`, `idx_wm_session_recall`, `idx_mem_emb_type`
+- `tools/bench_nai0.py` — minimal 20-question benchmark for quick before/after measurement
+
+### Changed
+- `BeamMemory.recall()` default `top_k`: 5 → 40
+- Polyphonic recall voice combination: weighted average → position-based RRF
+
+### Benchmark (NAI-0, 16-turn conversation, 20 questions)
+- Coverage: 0.583 → 1.000 (+71.5%) — full context at k=40 vs k=5
+- Results per query: 5 → 16 (3.2x more context)
+- P50 latency: 5-6ms (well within <500ms target)
+
 ## [2.4] — 2026-05-07
 
 ### Added

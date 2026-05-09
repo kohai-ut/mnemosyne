@@ -313,6 +313,14 @@ def init_beam(db_path: Path = None):
     _add_column_if_missing(conn, "episodic_memory", "superseded_by", "TEXT DEFAULT NULL")
     _add_column_if_missing(conn, "episodic_memory", "scope", "TEXT DEFAULT 'global'")
 
+    # --- NAI-0 Covering Indexes (v2.5) ---
+    cursor.execute("""CREATE INDEX IF NOT EXISTS idx_em_scope_imp
+        ON episodic_memory(scope, importance) WHERE superseded_by IS NULL""")
+    cursor.execute("""CREATE INDEX IF NOT EXISTS idx_wm_session_recall
+        ON working_memory(session_id, last_recalled) WHERE valid_until IS NULL""")
+    cursor.execute("""CREATE INDEX IF NOT EXISTS idx_mem_emb_type
+        ON memory_embeddings(memory_id, model)""")
+
     # --- Migration: multi-agent identity layer (v2.1) ---
     _add_column_if_missing(conn, "working_memory", "author_id", "TEXT DEFAULT NULL")
     _add_column_if_missing(conn, "working_memory", "author_type", "TEXT DEFAULT NULL")
@@ -1118,7 +1126,7 @@ class BeamMemory:
         self.conn.commit()
         return memory_id
 
-    def recall(self, query: str, top_k: int = 5, *,
+    def recall(self, query: str, top_k: int = 40, *,
                from_date: Optional[str] = None, to_date: Optional[str] = None,
                source: Optional[str] = None, topic: Optional[str] = None,
                author_id: Optional[str] = None,
@@ -1792,6 +1800,81 @@ class BeamMemory:
         self.conn.commit()
 
         return final_results
+
+    # ── Phase NAI-0: Context Formatting ────────────────────────────
+
+    def _sandwich_order(self, results: List[Dict], top_k: int = 10) -> dict:
+        """Sort by score and partition into high/medium/closing for sandwich ordering.
+
+        U-shaped attention: LLMs pay most attention to first AND last items.
+        High-scored facts go first, medium in the middle, high-scored again at end.
+        """
+        scored = sorted(results, key=lambda r: r.get("score", 0), reverse=True)
+        high = [r for r in scored if r.get("score", 0) > 0.7][:3]
+        medium = [r for r in scored if 0.3 < r.get("score", 0) <= 0.7][:5]
+        # Closing: last few high-scored items (not already in high)
+        closing_pool = [r for r in scored if r not in high][:3]
+        closing = closing_pool if closing_pool else high[:2]
+        return {"high": high, "medium": medium, "closing": closing}
+
+    def _fact_line(self, result: Dict) -> str:
+        """Clean one-line fact: 'User prefers dark mode (2026-05-09, user, c:0.9)'"""
+        content = (result.get("content") or "")[:200].strip()
+        ts_raw = result.get("timestamp") or ""
+        ts = ts_raw[:10] if ts_raw else "?"
+        source = result.get("source", "unknown")
+        score = result.get("score") or result.get("importance") or 0
+        return f"{content} ({ts}, {source}, c:{score:.1f})"
+
+    def format_context(self, results: List[Dict], format: str = "bullet") -> str:
+        """Format recall results as structured context for LLM injection.
+
+        Args:
+            results: List of recall result dicts (from recall() or polyphonic recall)
+            format: 'bullet' (default) for markdown bullets, 'json' for structured JSON
+
+        Returns:
+            Formatted context string ready for LLM prompt injection.
+        """
+        sandwich = self._sandwich_order(results)
+
+        if format == "json":
+            return self._format_context_json(sandwich)
+        return self._format_context_bullet(sandwich)
+
+    def _format_context_json(self, sandwich: dict) -> str:
+        """JSON structured context with sandwich ordering."""
+        import json as _json
+        context = {
+            "top_facts": [self._fact_line(r) for r in sandwich["high"]],
+            "supporting_context": [self._fact_line(r) for r in sandwich["medium"]],
+            "recent_memories": [self._fact_line(r) for r in sandwich["closing"]],
+            "total_memories": sum(len(v) for v in sandwich.values()),
+        }
+        return _json.dumps(context, indent=2, ensure_ascii=False)
+
+    def _format_context_bullet(self, sandwich: dict) -> str:
+        """Bullet-point context with sandwich ordering (U-shaped attention).
+
+        Highest-scored first, medium middle, high-scored again at end.
+        """
+        lines = []
+        lines.append("## Top Facts")
+        for r in sandwich["high"]:
+            lines.append(f"- {self._fact_line(r)}")
+        if sandwich["medium"]:
+            lines.append("")
+            lines.append("## Supporting Context")
+            for r in sandwich["medium"]:
+                lines.append(f"- {self._fact_line(r)}")
+        if sandwich["closing"]:
+            lines.append("")
+            lines.append("## Recent Signals")
+            for r in sandwich["closing"]:
+                lines.append(f"- {self._fact_line(r)}")
+        total = sum(len(v) for v in sandwich.values())
+        lines.append(f"\n_({total} memories retrieved)_")
+        return "\n".join(lines)
 
     def fact_recall(self, query: str, top_k: int = 30) -> List[Dict]:
         """Search the facts table (LLM-extracted structured knowledge).
