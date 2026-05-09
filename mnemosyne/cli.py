@@ -125,15 +125,19 @@ def cmd_stats(args):
     """Show memory system statistics."""
     mem = _get_memory()
     stats = mem.get_stats()
+    beam = stats.get("beam", {})
+    wm = beam.get("working_memory", {})
+    ep = beam.get("episodic_memory", {})
+    triples = beam.get("triples", {})
     print("\nMnemosyne Stats\n")
     print(f"  Total memories: {stats.get('total_memories', 0)}")
-    print(f"  Working memory: {stats.get('working_count', 0)}")
-    print(f"  Episodic memory: {stats.get('episodic_count', 0)}")
-    if stats.get("triple_count"):
-        print(f"  Knowledge triples: {stats['triple_count']}")
+    print(f"  Working memory: {wm.get('total', 0)}")
+    print(f"  Episodic memory: {ep.get('total', 0)}")
+    if triples.get("total"):
+        print(f"  Knowledge triples: {triples['total']}")
     if stats.get("banks"):
         print(f"\n  Banks: {', '.join(stats['banks'])}")
-    print(f"  DB path: {stats.get('db_path', 'N/A')}")
+    print(f"  DB path: {stats.get('database', 'N/A')}")
 
 
 def cmd_sleep(args):

@@ -363,6 +363,22 @@ class Mnemosyne:
         beam_ep = self.beam.get_episodic_stats(author_id=author_id, author_type=author_type,
                                                 channel_id=channel_id)
 
+        # Triples count — table is created lazily by TripleStore.init_triples;
+        # if it does not exist yet (no triple has ever been written), report 0.
+        triple_total = 0
+        try:
+            cursor.execute("SELECT COUNT(*) FROM triples")
+            triple_total = cursor.fetchone()[0]
+        except sqlite3.OperationalError:
+            pass
+
+        # Bank list — top-level because banks are a config concern, not a memory layer.
+        try:
+            from mnemosyne.core.banks import BankManager
+            banks = BankManager().list_banks()
+        except Exception:
+            banks = ["default"]
+
         return {
             "total_memories": total_legacy,
             "total_sessions": sessions,
@@ -370,9 +386,11 @@ class Mnemosyne:
             "last_memory": last[0] if last else None,
             "database": str(self.db_path),
             "mode": "beam",
+            "banks": banks,
             "beam": {
                 "working_memory": beam_wm,
-                "episodic_memory": beam_ep
+                "episodic_memory": beam_ep,
+                "triples": {"total": triple_total},
             }
         }
 
