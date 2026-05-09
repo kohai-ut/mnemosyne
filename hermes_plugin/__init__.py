@@ -41,11 +41,11 @@ _triple_store = None
 
 def _get_memory(session_id: str = None):
     """Get or create global memory instance. Recreates if session_id changes.
-    
+
     Identity is resolved from environment variables set by the Hermes plugin
     provider (e.g., MNEMOSYNE_AUTHOR_ID from user context).
     """
-    global _memory_instance, _current_session_id
+    global _memory_instance, _current_session_id, _triple_store
     if session_id is None:
         session_id = os.environ.get("HERMES_SESSION_ID", "hermes_default")
     if _memory_instance is None or _current_session_id != session_id:
@@ -56,14 +56,25 @@ def _get_memory(session_id: str = None):
             author_type=os.environ.get("MNEMOSYNE_AUTHOR_TYPE"),
             channel_id=os.environ.get("MNEMOSYNE_CHANNEL_ID")
         )
+        # Triple store cache must follow memory; reset so the next
+        # _get_triples() rebuilds with the new instance's db_path.
+        _triple_store = None
     return _memory_instance
 
 
 def _get_triples():
-    """Get or create global triple store instance, aligned with memory DB path."""
+    """Get or create global triple store instance, aligned with memory DB path.
+
+    Reads `_memory_instance` directly when present so this call does not
+    inadvertently trigger a session rebind via `_get_memory()` — calling
+    that with no args resolves session_id from the HERMES_SESSION_ID env
+    (or "hermes_default"), which may not match the active caller's session.
+    A db_path mismatch check rebuilds the cache if memory ever points at a
+    different DB than the cached store.
+    """
     global _triple_store
-    if _triple_store is None:
-        mem = _get_memory()
+    mem = _memory_instance if _memory_instance is not None else _get_memory()
+    if _triple_store is None or Path(_triple_store.db_path) != Path(mem.db_path):
         _triple_store = TripleStore(db_path=mem.db_path)
     return _triple_store
 
