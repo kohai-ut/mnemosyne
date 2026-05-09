@@ -112,6 +112,57 @@ class TestToolHandlers:
         assert result["bank"] == "default"
         mock_mnemosyne.remember.assert_called_once()
 
+    def test_handle_remember_uses_mcp_bank_env_default(self, mock_mnemosyne, monkeypatch):
+        """MCP server bank default applies when tool call omits bank."""
+        monkeypatch.setenv("MNEMOSYNE_MCP_BANK", "work")
+
+        with patch(
+            "mnemosyne.mcp_tools._create_instance",
+            return_value=mock_mnemosyne,
+        ) as create_instance:
+            result = handle_tool_call("mnemosyne_remember", {
+                "content": "Test memory",
+                "source": "test",
+            })
+
+        assert result["status"] == "stored"
+        assert result["bank"] == "work"
+        assert create_instance.call_args.kwargs["bank"] == "work"
+
+    def test_handle_remember_bank_arg_overrides_mcp_bank_env(self, mock_mnemosyne, monkeypatch):
+        """Explicit per-call bank should override the server default bank."""
+        monkeypatch.setenv("MNEMOSYNE_MCP_BANK", "work")
+
+        with patch(
+            "mnemosyne.mcp_tools._create_instance",
+            return_value=mock_mnemosyne,
+        ) as create_instance:
+            result = handle_tool_call("mnemosyne_remember", {
+                "content": "Test memory",
+                "source": "test",
+                "bank": "personal",
+            })
+
+        assert result["status"] == "stored"
+        assert result["bank"] == "personal"
+        assert create_instance.call_args.kwargs["bank"] == "personal"
+
+    def test_handle_recall_uses_mcp_bank_env_default(self, mock_mnemosyne, monkeypatch):
+        """MCP recall should use the server default bank when omitted."""
+        monkeypatch.setenv("MNEMOSYNE_MCP_BANK", "work")
+
+        with patch(
+            "mnemosyne.mcp_tools._create_instance",
+            return_value=mock_mnemosyne,
+        ) as create_instance:
+            result = handle_tool_call("mnemosyne_recall", {
+                "query": "test query",
+            })
+
+        assert result["status"] == "ok"
+        assert result["bank"] == "work"
+        assert create_instance.call_args.kwargs["bank"] == "work"
+
     def test_handle_recall(self, mock_mnemosyne):
         """handle_recall returns list of results."""
         with patch("mnemosyne.mcp_tools._create_instance", return_value=mock_mnemosyne):
