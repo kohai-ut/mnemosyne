@@ -829,9 +829,12 @@ def _vec_search(conn: sqlite3.Connection, embedding: List[float], k: int = 20) -
 
 
 def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]:
-    """Search FTS5 episodes and return rowids with ranks."""
-    safe_query = " ".join(f'"{w}"' for w in query.split() if w)
-    if not safe_query:
+    """Search FTS5 episodes and return rowids with ranks.
+    Strips FTS5-special characters, keeps alphanumeric + spaces."""
+    import re as _re
+    safe_query = _re.sub(r'[^\w\s]', ' ', query)
+    safe_query = ' '.join(safe_query.split())  # Collapse whitespace
+    if not safe_query.strip():
         return []
     rows = conn.execute(
         "SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank LIMIT ?",
@@ -841,15 +844,60 @@ def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]
 
 
 def _fts_search_working(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]:
-    """Search FTS5 working memory and return ids with ranks."""
-    safe_query = " ".join(f'"{w}"' for w in query.split() if w)
-    if not safe_query:
+    """Search FTS5 working memory and return ids with ranks.
+    Strips FTS5-special characters, keeps alphanumeric + spaces."""
+    import re as _re
+    safe_query = _re.sub(r'[^\w\s]', ' ', query)
+    safe_query = ' '.join(safe_query.split())  # Collapse whitespace
+    if not safe_query.strip():
         return []
     rows = conn.execute(
         "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank LIMIT ?",
         (safe_query, k)
     ).fetchall()
     return [{"id": r["id"], "rank": r["rank"]} for r in rows]
+
+
+def _wm_vec_search(conn: sqlite3.Connection, query_embedding, k: int = 20) -> List[Dict]:
+    """Vector search against working_memory via memory_embeddings table.
+    Returns list of dicts with 'id' (memory_id) and 'sim' (cosine similarity)."""
+    if np is None:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT wm.id, me.embedding_json
+            FROM memory_embeddings me
+            JOIN working_memory wm ON me.memory_id = wm.id
+            WHERE wm.superseded_by IS NULL
+              AND (wm.valid_until IS NULL OR wm.valid_until > ?)
+            LIMIT 50000
+        """, (datetime.now().isoformat(),))
+    except Exception:
+        return []
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+
+    query_norm = np.linalg.norm(query_embedding)
+    if query_norm == 0:
+        return []
+    query_unit = query_embedding / query_norm
+
+    results = []
+    for row in rows:
+        try:
+            vec = np.array(json.loads(row["embedding_json"]), dtype=np.float32)
+            vec_norm = np.linalg.norm(vec)
+            if vec_norm == 0:
+                continue
+            sim = float(np.dot(query_unit, vec / vec_norm))
+            results.append({"id": row["id"], "sim": sim})
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x["sim"], reverse=True)
+    return results[:k]
 
 
 class BeamMemory:
@@ -1029,6 +1077,23 @@ class BeamMemory:
                 item_type
             ))
         self.conn.commit()
+        
+        # Generate vector embeddings for working memory hybrid search
+        if _embeddings.available():
+            try:
+                contents = [item["content"] for item in items]
+                vectors = _embeddings.embed(contents)
+                if vectors is not None:
+                    model = _embeddings._DEFAULT_MODEL
+                    for i, memory_id in enumerate(ids):
+                        emb_json = _embeddings.serialize(vectors[i])
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)",
+                            (memory_id, emb_json, model)
+                        )
+            except Exception:
+                pass  # Vector embedding is best-effort, non-blocking
+        
         self._trim_working_memory()
         return ids
 
@@ -1358,6 +1423,19 @@ class BeamMemory:
         wm_ids = {r["id"] for r in wm_fts}
         wm_ranks = {r["id"]: r["rank"] for r in wm_fts}
 
+        # ---- Working memory (vector search) ----
+        wm_vec_sims = {}
+        if _embeddings.available():
+            try:
+                emb_result = _embeddings.embed_query(query)
+                if emb_result is not None:
+                    wm_vec = _wm_vec_search(self.conn, emb_result, k=max(top_k * 3, 50))
+                    for vr in wm_vec:
+                        wm_vec_sims[vr["id"]] = vr["sim"]
+                        wm_ids.add(vr["id"])  # Merge vector results with FTS5 results
+            except Exception:
+                pass
+
         # Build temporal filter clause for working memory
         wm_where_clauses = [
             "(valid_until IS NULL OR valid_until > ?)",
@@ -1464,6 +1542,10 @@ class BeamMemory:
                 kw_share = (1.0 - iw) * 0.6
                 rc_share = (1.0 - iw) * 0.4
                 base_score = relevance * kw_share + row["importance"] * iw
+                # Blend vector similarity into working memory score
+                vec_sim = wm_vec_sims.get(row["id"], 0.0)
+                if vec_sim > 0:
+                    base_score = base_score * 0.7 + vec_sim * 0.3
                 score = base_score * (rc_share + (1.0 - rc_share) * decay)
                 # Temporal boost (Phase 3)
                 if temporal_weight > 0.0:
@@ -1477,7 +1559,7 @@ class BeamMemory:
                     "tier": "working",
                     "score": round(score, 4),
                     "keyword_score": round(relevance, 4),
-                    "dense_score": 0.0,
+                    "dense_score": round(vec_sim, 4),
                     "fts_score": round(relevance, 4) if wm_ranks else 0.0,
                     "importance": row["importance"],
                     "recall_count": row["recall_count"] or 0,
@@ -1531,7 +1613,7 @@ class BeamMemory:
                         "tier": "working",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": 0.0,
+                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -1592,7 +1674,7 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": 0.0,
+                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -1645,7 +1727,7 @@ class BeamMemory:
                         "tier": "working",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": 0.0,
+                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -1705,7 +1787,7 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": 0.0,
+                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -1946,7 +2028,7 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": round(relevance, 4),
-                        "dense_score": 0.0,
+                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
