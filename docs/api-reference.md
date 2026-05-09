@@ -330,18 +330,25 @@ facts = extract_facts_safe("Some text to extract facts from")
 ### MemoryStream
 
 ```python
-from mnemosyne.core.streaming import MemoryStream
+from mnemosyne.core.streaming import EventType, MemoryEvent, MemoryStream
 
 stream = MemoryStream()
 
 # Push events
-stream.push("remember", {"id": "abc", "content": "test"})
+stream.emit(MemoryEvent(
+    event_type=EventType.MEMORY_ADDED,
+    memory_id="abc",
+    content="test",
+))
 
-# Pull via callback
-stream.on_event(lambda event: print(event))
+# Pull via callback for one event type
+stream.on(EventType.MEMORY_ADDED, lambda event: print(event))
+
+# Pull via callback for all event types
+stream.on_any(lambda event: print(event))
 
 # Pull via iterator
-for event in stream:
+for event in stream.listen():
     process(event)
 ```
 
@@ -351,16 +358,19 @@ for event in stream:
 from mnemosyne.core.streaming import DeltaSync
 
 sync = DeltaSync(mnemosyne_instance)
+peer_id = "peer-node-1"
 
-# Compute changes since last checkpoint
-delta = sync.compute_delta()
+# Compute changes since this peer's last checkpoint
+delta = sync.compute_delta(peer_id)
 
-# Apply delta to another instance
-sync.apply_delta(delta)
+# Apply a delta received from that peer
+stats = sync.apply_delta(peer_id, delta)
 
-# Full bidirectional sync
-sync.sync_to(other_mnemosyne)
-sync.sync_from(other_mnemosyne)
+# Package a delta for transport to a peer
+outgoing = sync.sync_to(peer_id)
+
+# Apply a received delta and update the peer checkpoint
+result = sync.sync_from(peer_id, incoming_delta)
 ```
 
 ---
