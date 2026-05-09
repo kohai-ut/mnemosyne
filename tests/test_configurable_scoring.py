@@ -18,7 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mnemosyne.core.memory import Mnemosyne, recall as module_recall
+import mnemosyne.core.memory as memory_module
+from mnemosyne.core.memory import Mnemosyne
 from mnemosyne.core.beam import (
     _normalize_weights,
     BeamMemory,
@@ -253,13 +254,18 @@ class TestPublicRecallConfigurableWeights:
         assert isinstance(results, list)
         assert len(results) > 0
 
-    def test_module_recall_accepts_weight_params(self, temp_db, monkeypatch):
+    def test_module_recall_accepts_weight_params(self, monkeypatch):
         """mnemosyne.recall() module helper should expose the same scoring weights."""
-        monkeypatch.setenv("MNEMOSYNE_DATA_DIR", str(temp_db.parent))
-        mem = Mnemosyne(session_id="test", db_path=temp_db)
-        mem.remember("Module helper weight forwarding", importance=0.8)
+        class FakeMemory:
+            def recall(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+                return [{"id": "test", "content": "weight forwarding"}]
 
-        results = module_recall(
+        fake = FakeMemory()
+        monkeypatch.setattr(memory_module, "_get_default", lambda bank=None: fake)
+
+        results = memory_module.recall(
             "weight forwarding",
             top_k=5,
             vec_weight=0.6,
@@ -269,6 +275,9 @@ class TestPublicRecallConfigurableWeights:
 
         assert isinstance(results, list)
         assert len(results) > 0
+        assert fake.kwargs["vec_weight"] == 0.6
+        assert fake.kwargs["fts_weight"] == 0.3
+        assert fake.kwargs["importance_weight"] == 0.1
 
 
 # ============================================================================
