@@ -390,3 +390,83 @@ def test_handle_remember_response_echoes_metadata(monkeypatch):
     assert parsed.get("metadata") == {"source_doc": "deck.pdf", "page": 7}, (
         f"response missing metadata echo: {parsed!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #45 followup — RECALL_SCHEMA + _handle_recall scoring weight forwarding
+# ---------------------------------------------------------------------------
+#
+# Adversarial review of issue #45's PR caught that the Hermes-side recall
+# surface here also drops vec_weight / fts_weight / importance_weight. The
+# RECALL_SCHEMA's description literally says "50% vector + 30% FTS5 + 20%
+# importance" but never lets clients tune those weights. Same shape as the
+# C12.b REMEMBER fix in this same file — schema mismatch with what
+# BeamMemory.recall actually accepts.
+
+def test_recall_schema_advertises_scoring_weights():
+    """[issue #45 followup] RECALL_SCHEMA must advertise the per-call scoring
+    weights that BeamMemory.recall accepts (beam.py:1296-1298) so Hermes'
+    tool-arg validator accepts them instead of stripping as unknown fields."""
+    from hermes_memory_provider import RECALL_SCHEMA
+
+    props = RECALL_SCHEMA["parameters"]["properties"]
+    for key in ("vec_weight", "fts_weight", "importance_weight"):
+        assert key in props, (
+            f"RECALL_SCHEMA missing {key!r} — schema description claims "
+            f"'50% vector + 30% FTS5 + 20% importance' but never lets the "
+            f"client tune those weights"
+        )
+        assert props[key]["type"] == "number"
+
+
+def test_handle_recall_forwards_scoring_weights_to_beam(monkeypatch):
+    """[issue #45 followup] _handle_recall must forward vec_weight /
+    fts_weight / importance_weight when the caller supplies them, so the
+    schema-advertised tuning actually takes effect on ranking."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.recall.return_value = []
+    provider._beam = beam
+
+    provider._handle_recall({
+        "query": "anything",
+        "limit": 3,
+        "vec_weight": 0.55,
+        "fts_weight": 0.25,
+        "importance_weight": 0.20,
+    })
+
+    kwargs = beam.recall.call_args.kwargs
+    assert kwargs.get("vec_weight") == 0.55, (
+        f"_handle_recall did not forward vec_weight; kwargs={kwargs!r}"
+    )
+    assert kwargs.get("fts_weight") == 0.25
+    assert kwargs.get("importance_weight") == 0.20
+
+
+def test_handle_recall_omits_weights_when_caller_does_not_supply():
+    """[issue #45 followup] When caller omits the weight kwargs, the handler
+    must NOT pass spurious values to beam.recall — beam treats None as
+    "fall back to env var or default" via _normalize_weights, and forcing
+    0.0 / 0.5 / etc. would override that resolution."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.recall.return_value = []
+    provider._beam = beam
+
+    provider._handle_recall({"query": "anything", "limit": 3})
+
+    kwargs = beam.recall.call_args.kwargs
+    # Acceptable: the kwarg is not in beam.recall's call OR is explicitly None.
+    # Failing path: a numeric default like 0.5 / 0.0 leaked through.
+    for key in ("vec_weight", "fts_weight", "importance_weight"):
+        val = kwargs.get(key, "OMITTED")
+        assert val in (None, "OMITTED"), (
+            f"_handle_recall forwarded {key}={val!r} when caller omitted it; "
+            f"this overrides beam's env/default resolution. Either pass None "
+            f"or omit the kwarg entirely."
+        )

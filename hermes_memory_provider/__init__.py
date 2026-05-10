@@ -81,9 +81,10 @@ REMEMBER_SCHEMA = {
 RECALL_SCHEMA = {
     "name": "mnemosyne_recall",
     "description": (
-        "Search Mnemosyne for relevant memories. Uses hybrid ranking: 50% vector "
-        "similarity + 30% FTS5 text rank + 20% importance + optional temporal boost. "
-        "Supports temporal weighting to boost recent memories. Returns ranked results."
+        "Search Mnemosyne for relevant memories. Uses hybrid ranking: by default "
+        "50% vector similarity + 30% FTS5 text rank + 20% importance + optional "
+        "temporal boost. Tune the per-query weights via vec_weight, fts_weight, "
+        "importance_weight (omit to use environment defaults). Returns ranked results."
     ),
     "parameters": {
         "type": "object",
@@ -104,6 +105,18 @@ RECALL_SCHEMA = {
                 "type": "number",
                 "description": "Hours until temporal boost decays by half. Default 24. Lower = faster decay.",
                 "default": 24,
+            },
+            "vec_weight": {
+                "type": "number",
+                "description": "Vector similarity weight in hybrid scoring. Omit (or pass null) to use MNEMOSYNE_VEC_WEIGHT env var or built-in default 0.5.",
+            },
+            "fts_weight": {
+                "type": "number",
+                "description": "Full-text search weight in hybrid scoring. Omit (or pass null) to use MNEMOSYNE_FTS_WEIGHT env var or built-in default 0.3.",
+            },
+            "importance_weight": {
+                "type": "number",
+                "description": "Importance score weight in hybrid scoring. Omit (or pass null) to use MNEMOSYNE_IMPORTANCE_WEIGHT env var or built-in default 0.2.",
             },
         },
         "required": ["query"],
@@ -457,12 +470,23 @@ class MnemosyneMemoryProvider(MemoryProvider):
         temporal_halflife_hours = float(args.get("temporal_halflife", 24))
         if not query:
             return json.dumps({"error": "query is required"})
-        results = self._beam.recall(
-            query, top_k=top_k,
-            temporal_weight=temporal_weight,
-            query_time=query_time,
-            temporal_halflife=temporal_halflife_hours,
-        )
+
+        # Forward configurable scoring weights ONLY when the caller actually
+        # supplied them. beam.recall treats None as "fall back to env var or
+        # default" via _normalize_weights; passing 0.0 / 0.5 / etc. when the
+        # caller didn't ask for tuning would override that resolution and
+        # break MNEMOSYNE_*_WEIGHT env-var deployments. See issue #45.
+        recall_kwargs: Dict[str, Any] = {
+            "top_k": top_k,
+            "temporal_weight": temporal_weight,
+            "query_time": query_time,
+            "temporal_halflife": temporal_halflife_hours,
+        }
+        for weight_key in ("vec_weight", "fts_weight", "importance_weight"):
+            if weight_key in args:
+                recall_kwargs[weight_key] = args[weight_key]
+
+        results = self._beam.recall(query, **recall_kwargs)
         return json.dumps({"query": query, "count": len(results), "temporal_weight": temporal_weight, "results": results})
 
     def _handle_sleep(self, args: Dict[str, Any]) -> str:
