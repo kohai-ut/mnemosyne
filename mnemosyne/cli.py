@@ -202,6 +202,8 @@ def cmd_import_hindsight(args):
     else:
         result = import_from_hindsight(mem, file_path=target, bank=bank)
     print(result.to_json())
+    if result.errors:
+        raise SystemExit(1)
 
 
 def cmd_mcp(args):
