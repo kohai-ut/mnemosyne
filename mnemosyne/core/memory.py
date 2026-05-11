@@ -242,9 +242,11 @@ class Mnemosyne:
 
         Args:
             extract_entities: If True, extract entities from content and store
-                as triples for fuzzy entity-aware recall. Default False.
+                in the AnnotationStore (kind='mentions') for fuzzy entity-aware
+                recall. Default False. (Pre-E6 wrote to TripleStore; the storage
+                target moved as part of E6 — see mnemosyne.core.annotations.)
             extract: If True, extract structured facts from content using LLM
-                and store as triples. Default False.
+                and store in the AnnotationStore (kind='fact'). Default False.
         """
         # BEAM write first (generates its own ID)
         memory_id = self.beam.remember(content, source=source, importance=importance, metadata=metadata,
@@ -298,11 +300,11 @@ class Mnemosyne:
         if extract:
             try:
                 from mnemosyne.core.extraction import extract_facts_safe
-                from mnemosyne.core.annotations import AnnotationStore
+                from mnemosyne.core.annotations import AnnotationStore, filter_facts
                 facts = extract_facts_safe(content)
                 if facts:
                     # Match legacy filtering from TripleStore.add_facts.
-                    kept = [f for f in facts if f and len(f) > 10]
+                    kept = filter_facts(facts)
                     if kept:
                         annotations = AnnotationStore(db_path=self.db_path)
                         annotations.add_many(
@@ -457,15 +459,21 @@ class Mnemosyne:
 
     def export_to_file(self, output_path: str) -> Dict:
         """
-        Export all Mnemosyne data (legacy + BEAM + triples) to a JSON file.
-        Returns export metadata.
+        Export all Mnemosyne data (legacy + BEAM + triples + annotations) to
+        a JSON file. Returns export metadata.
+
+        Schema version 1.1 (post-E6) adds an `annotations` section alongside
+        the existing `triples` section. Imports of 1.0 backups still work —
+        they simply restore zero annotations, and the auto-migrate hook will
+        relocate any annotation-flavored triples rows on next BeamMemory init.
         """
         from mnemosyne.core.triples import TripleStore
+        from mnemosyne.core.annotations import AnnotationStore
         import json as _json
 
         export = {
             "mnemosyne_export": {
-                "version": "1.0",
+                "version": "1.1",
                 "export_date": datetime.now().isoformat(),
                 "source_db": str(self.db_path),
             }
@@ -497,9 +505,15 @@ class Mnemosyne:
         """)
         export["legacy_embeddings"] = [dict(row) for row in cursor.fetchall()]
 
-        # Triples
+        # Triples (current-truth temporal facts; post-E6 scope)
         triples = TripleStore(db_path=self.db_path)
         export["triples"] = triples.export_all()
+
+        # Annotations (post-E6: multi-valued mentions, facts, occurred_on,
+        # has_source). Pre-E6 backups won't have this key — the import path
+        # handles that gracefully.
+        annotations = AnnotationStore(db_path=self.db_path)
+        export["annotations"] = annotations.export_all()
 
         with open(output_path, "w", encoding="utf-8") as f:
             _json.dump(export, f, indent=2, ensure_ascii=False, default=str)
@@ -512,6 +526,7 @@ class Mnemosyne:
             "scratchpad_count": len(export["scratchpad"]),
             "legacy_memories_count": len(export["legacy_memories"]),
             "triples_count": len(export["triples"]),
+            "annotations_count": len(export["annotations"]),
         }
 
     def import_from_file(self, input_path: str, force: bool = False) -> Dict:
@@ -520,19 +535,26 @@ class Mnemosyne:
         Idempotent by default: skips existing records.
         Set force=True to overwrite.
         Returns import statistics.
+
+        Accepts both schema version 1.0 (pre-E6) and 1.1 (post-E6). When a
+        1.0 backup is imported, the `annotations` section is treated as empty
+        and any annotation-flavored rows in the imported `triples` will be
+        relocated by the auto-migrate hook on the next BeamMemory init.
         """
         from mnemosyne.core.triples import TripleStore
+        from mnemosyne.core.annotations import AnnotationStore
         import json as _json
 
         with open(input_path, "r", encoding="utf-8") as f:
             data = _json.load(f)
 
-        # Validate
+        # Validate — accept the two known schema versions.
         meta = data.get("mnemosyne_export", {})
-        if meta.get("version") != "1.0":
-            raise ValueError(f"Unsupported export version: {meta.get('version')}")
+        version = meta.get("version")
+        if version not in ("1.0", "1.1"):
+            raise ValueError(f"Unsupported export version: {version}")
 
-        stats = {"beam": {}, "legacy": {}, "triples": {}}
+        stats = {"beam": {}, "legacy": {}, "triples": {}, "annotations": {}}
 
         # BEAM import
         beam_stats = self.beam.import_from_dict(data, force=force)
@@ -580,10 +602,15 @@ class Mnemosyne:
         self.conn.commit()
         stats["legacy"] = l_stats
 
-        # Triples
+        # Triples (current-truth temporal facts)
         triples = TripleStore(db_path=self.db_path)
         t_stats = triples.import_all(data.get("triples", []), force=force)
         stats["triples"] = t_stats
+
+        # Annotations (post-E6 schema 1.1; absent from 1.0 backups)
+        annotations = AnnotationStore(db_path=self.db_path)
+        a_stats = annotations.import_all(data.get("annotations", []), force=force)
+        stats["annotations"] = a_stats
 
         return stats
 
