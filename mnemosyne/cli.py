@@ -210,7 +210,7 @@ def cmd_mcp(args):
     """Start MCP server."""
     try:
         from mnemosyne.mcp_server import main as mcp_main
-        mcp_main()
+        mcp_main(args)
     except ImportError:
         print("MCP not available. Install with: pip install mnemosyne-memory[mcp]")
         sys.exit(1)
