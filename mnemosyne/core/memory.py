@@ -198,6 +198,37 @@ class Mnemosyne:
             memories = self.get_all_memories()
         return self.patterns.summarize_patterns(memories)
 
+    def get_all_memories(self) -> List[Dict]:
+        """Return all working + episodic rows for pattern analysis.
+
+        Scoped to the active session (and global memories), with the same
+        validity filters that get_context() and recall() apply: invalidated
+        and expired memories are excluded so retracted notes do not skew
+        pattern detection.
+        """
+        now = datetime.now().isoformat()
+        cursor = self.beam.conn.cursor()
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM working_memory
+            WHERE (session_id = ? OR scope = 'global')
+              AND (valid_until IS NULL OR valid_until > ?)
+              AND superseded_by IS NULL
+        """, (self.session_id, now))
+        rows = [dict(row) for row in cursor.fetchall()]
+        seen_ids = {r["id"] for r in rows}
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM episodic_memory
+            WHERE (session_id = ? OR scope = 'global')
+              AND (valid_until IS NULL OR valid_until > ?)
+              AND superseded_by IS NULL
+        """, (self.session_id, now))
+        for row in cursor.fetchall():
+            if row["id"] not in seen_ids:
+                rows.append(dict(row))
+        return rows
+
     # ─── Phase 8: Delta Sync ──────────────────────────────────────
 
     @property
