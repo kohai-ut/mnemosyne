@@ -556,9 +556,37 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
                 )
                 beam.conn.commit()
 
-                result = beam.sleep(dry_run=False)
-                if result.get("status") == "consolidated":
-                    stats["ep_count"] += int(result.get("summaries_created", 0) or 0)
+                # Drain the entire backdated batch. sleep() processes
+                # up to SLEEP_BATCH_SIZE rows per call (default 5000,
+                # well above the benchmark's BATCH_SIZE=500). But
+                # MNEMOSYNE_SLEEP_BATCH can be configured below
+                # BATCH_SIZE, in which case a single sleep() call
+                # leaves some backdated rows un-consolidated. Those
+                # rows then carry a TTL-old timestamp AND
+                # consolidated_at IS NULL — exactly the predicate
+                # _trim_working_memory uses to DELETE them on the
+                # next remember_batch call. Loop until sleep returns
+                # no_op (or errors) so the contract holds regardless
+                # of env config. See Codex /review on PR #75 (P2).
+                max_iters = 50  # safety bound; one batch should
+                                # never need more than a few cycles
+                while max_iters > 0:
+                    result = beam.sleep(dry_run=False)
+                    max_iters -= 1
+                    if result.get("status") == "consolidated":
+                        stats["ep_count"] += int(
+                            result.get("summaries_created", 0) or 0
+                        )
+                        # If sleep drained fewer than SLEEP_BATCH_SIZE
+                        # rows, the eligible set is empty and the
+                        # next call would be no_op — break early.
+                        items = int(result.get("items_consolidated", 0) or 0)
+                        if items == 0:
+                            break
+                        # Otherwise keep draining.
+                        continue
+                    # no_op or any other status: drain complete.
+                    break
                 # E3 contract: originals stay, so stats["wm_count"]
                 # does NOT decrement. Pre-E1 we did stats["wm_count"]
                 # -= ... which produced wm_count=0 always; post-E1 it

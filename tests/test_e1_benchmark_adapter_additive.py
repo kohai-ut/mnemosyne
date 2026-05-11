@@ -205,6 +205,54 @@ class TestE1AdditiveBenchmarkIngest:
             f"backdate step is off"
         )
 
+    def test_sleep_drains_full_batch_under_small_sleep_batch_size(
+        self, temp_db, disable_llm, monkeypatch
+    ):
+        """[E1 Codex review P2] If MNEMOSYNE_SLEEP_BATCH is configured
+        below the benchmark's BATCH_SIZE, a single beam.sleep() call
+        only claims part of the backdated batch. The remaining rows
+        carry a TTL-old timestamp AND consolidated_at IS NULL —
+        _trim_working_memory's predicate. On the next remember_batch
+        the trim would DELETE them as 'old working memory,' violating
+        the preserved-corpus contract. The adapter must drain the
+        full batch (loop sleep until no_op) regardless of env config."""
+        # Override SLEEP_BATCH_SIZE to 3 so a 10-message batch needs
+        # multiple sleep calls to drain. The constant is module-level
+        # and read at import time; monkeypatching the module attr is
+        # sufficient because sleep() reads via the bound name.
+        import mnemosyne.core.beam as beam_module
+        monkeypatch.setattr(beam_module, "SLEEP_BATCH_SIZE", 3)
+
+        adapter = _import_benchmark_adapter()
+        beam = BeamMemory(session_id="e1-drain", db_path=temp_db)
+
+        # 10 messages → at least 4 sleep iterations needed (3 + 3 + 3 + 1).
+        messages = _make_messages(10)
+        adapter.ingest_conversation(beam, messages)
+
+        # All originals must survive AND be marked consolidated.
+        conn = sqlite3.connect(str(temp_db))
+        wm_count = conn.execute(
+            "SELECT COUNT(*) FROM working_memory WHERE session_id = ?",
+            ("e1-drain",),
+        ).fetchone()[0]
+        unconsolidated = conn.execute(
+            "SELECT COUNT(*) FROM working_memory "
+            "WHERE session_id = ? AND consolidated_at IS NULL",
+            ("e1-drain",),
+        ).fetchone()[0]
+        conn.close()
+
+        assert wm_count == len(messages), (
+            f"only {wm_count}/{len(messages)} rows survived under "
+            f"SLEEP_BATCH_SIZE=3; _trim deleted un-drained rows."
+        )
+        assert unconsolidated == 0, (
+            f"{unconsolidated} rows still un-consolidated after ingest; "
+            f"sleep didn't drain the full batch when SLEEP_BATCH_SIZE "
+            f"was smaller than the benchmark batch."
+        )
+
     def test_backdate_does_not_clobber_other_batches(self, temp_db, disable_llm):
         """[E1 adversarial F1/F3] The per-batch backdate UPDATE must
         scope to the current batch's ids. If it walked every
