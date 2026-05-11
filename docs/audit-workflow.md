@@ -3,19 +3,49 @@
 **Purpose:** Bi-weekly cross-reference audit of docs site against codebase.
 **Cadence:** Every 2 weeks (or after any version bump / major feature merge).
 **Audience:** Hermes Agent (send this document as context to re-run the audit).
+**Checkpoint file:** `.audit-state.json` in `mnemosyne-docs` repo — tracks what was audited when.
 
 ---
 
-## Pre-Flight (5 min)
+## Phase 0: Load Checkpoint + Determine Scope (2 min)
 
-- [ ] Confirm working directory: `cd /root/.hermes/projects/mnemosyne`
-- [ ] Check current version: `python -c "import mnemosyne; print(mnemosyne.__version__)"`
-- [ ] Check last audit: `cat /root/.hermes/projects/mnemosyne-docs/.planning/AUDIT-REPORT-*.md | head -5`
-- [ ] Note: All patches go to `content/` files, then mirror to `src/app/(docs)/` copies.
+**This is the key to avoiding redundant work.** The checkpoint file at `/root/.hermes/projects/mnemosyne-docs/.audit-state.json` tracks every page's last audit hash. Only re-audit pages whose content hash changed since then.
+
+### Step 0.1: Load the checkpoint
+```python
+import json
+with open("/root/.hermes/projects/mnemosyne-docs/.audit-state.json") as f:
+    state = json.load(f)
+```
+
+### Step 0.2: Find changed files
+```bash
+cd /root/.hermes/projects/mnemosyne-docs
+# For each tracked file, compare current hash to audited hash
+git diff --name-only HEAD~10..HEAD -- 'content/**' 'src/app/(docs)/**'
+```
+
+### Step 0.3: Build audit scope
+
+Three categories:
+
+| Category | Condition | Action |
+|----------|-----------|--------|
+| **Skip** | File hash matches `audit_hash` in checkpoint AND codebase version hasn't changed | Skip entirely. This page was verified against this exact code and content. |
+| **Re-audit** | File hash differs from `audit_hash` | The page was edited since last audit. Verify it against current codebase. |
+| **First audit** | File not in checkpoint at all | Never audited. Full audit needed. |
+
+**Also check:**
+- [ ] Codebase version changed? → Re-audit ALL previously audited pages (API may have changed)
+- [ ] New pages added to docs site? → They won't be in checkpoint, add to audit scope
+- [ ] New tools/importers/features in codebase? → Check relevant doc pages exist
+
+### Step 0.4: Report scope
+Before starting, report: "Skipping X pages (unchanged), auditing Y pages (changed), first-auditing Z pages (new)." This transparency is how you know you're not burning tokens.
 
 ---
 
-## Phase 1: Codebase Surface Map (15 min)
+## Phase 1: Codebase Surface Map (only if version changed)
 
 Generate a fresh codebase map. This tells you what actually exists.
 
@@ -169,19 +199,113 @@ fix(docs): bi-weekly audit — [brief summary of what changed]
 
 ---
 
+## Phase 7: Update Checkpoint + Report (5 min)
+
+### 7.1: Update the checkpoint file
+After fixing everything, update `.audit-state.json`:
+
+```python
+import json, subprocess
+from datetime import datetime, timezone
+
+with open("/root/.hermes/projects/mnemosyne-docs/.audit-state.json") as f:
+    state = json.load(f)
+
+now = datetime.now(timezone.utc).isoformat()
+
+# Update timestamps
+state["last_full_audit"] = now
+state["codebase_version"] = CURRENT_VERSION  # from Phase 1
+
+# Update each audited file's hash and status
+for filepath in audited_files:
+    h = subprocess.check_output(["git", "ls-tree", "HEAD", filepath]).decode().split()[2]
+    if filepath in state["files"]:
+        state["files"][filepath]["last_audited"] = now[:10]
+        state["files"][filepath]["audit_hash"] = h
+        state["files"][filepath]["status"] = "clean"
+    else:
+        state["files"][filepath] = {
+            "last_audited": now[:10],
+            "audit_hash": h,
+            "status": "clean",
+            "category": "source" if filepath.startswith("content/") else "mirror"
+        }
+
+# Append to audit history
+state["audit_history"].append({
+    "date": now[:10],
+    "codebase_version": CURRENT_VERSION,
+    "pages_audited": len(audited_files),
+    "issues_found": N_ISSUES,
+    "issues_fixed": N_FIXED,
+    "commit": GIT_COMMIT_HASH,
+    "summary": "Brief description of what changed"
+})
+
+with open("/root/.hermes/projects/mnemosyne-docs/.audit-state.json", "w") as f:
+    json.dump(state, f, indent=2)
+```
+
+### 7.2: Write executive report
+- Write to `docs/audit-report-YYYY-MM-DD.md` in the main mnemosyne repo
+- Include: pages audited, skipped, issues found, fixes applied, remaining risks
+- Reference the checkpoint for full state
+
+### 7.3: Commit both repos
+```bash
+cd /root/.hermes/projects/mnemosyne-docs
+git add .audit-state.json && git commit -m "chore: update audit checkpoint [date]"
+git push
+
+cd /root/.hermes/projects/mnemosyne
+git add docs/audit-report-*.md docs/audit-workflow.md && git commit -m "docs: audit report [date]"
+git push
+```
+
+---
+
+## Checkpoint File Schema
+
+The `.audit-state.json` file follows this structure:
+
+```json
+{
+  "_schema": "mnemosyne-docs-audit-checkpoint-v1",
+  "last_full_audit": "ISO timestamp",
+  "codebase_version": "2.5.0",
+  "audit_history": [
+    {
+      "date": "YYYY-MM-DD",
+      "codebase_version": "X.Y.Z",
+      "pages_audited": N,
+      "issues_found": N,
+      "issues_fixed": N,
+      "commit": "git hash",
+      "summary": "text"
+    }
+  ],
+  "files": {
+    "content/path/to/page.mdx": {
+      "last_audited": "YYYY-MM-DD",
+      "audit_hash": "git blob hash",
+      "status": "clean|issues_pending",
+      "category": "source|mirror",
+      "note": "optional context"
+    }
+  }
+}
+```
+
+**Key invariant:** A page's `audit_hash` is the git blob hash of the file AT THE TIME of the audit. On next audit, compare current blob hash to `audit_hash`. If they match and codebase version hasn't changed, skip the page.
+
+---
+
 ## Phase 6: Website Cross-Check (5 min)
 
 - [ ] `mnemosyne-website/src/components/HomePage.tsx` — BEAM labels still correct
 - [ ] `mnemosyne-website/src/data/changelog.json` — last sync date is recent
 - [ ] Website version matches codebase version
-
----
-
-## Phase 7: Report (5 min)
-
-- [ ] Write executive report to `.planning/AUDIT-REPORT-YYYY-MM-DD.md`
-- [ ] Include: pages audited, issues found, fixes applied, remaining risks
-- [ ] Update this workflow if new pain points discovered
 
 ---
 
@@ -202,6 +326,8 @@ fix(docs): bi-weekly audit — [brief summary of what changed]
 6. **Don't assume documentation is accurate.** Some pages were clearly generated from assumptions. Always verify against source code, not other documentation.
 
 7. **subagent `read_file` can drop data.** When reading files with `read_file` and rewriting with `write_file`, frontmatter/export blocks can be lost. Use the `patch` tool for all edits, or verify content integrity after writes.
+
+8. **The checkpoint file eliminates redundant work.** Without it, every audit is a full scan of 67+ pages. With it, only pages that changed get re-audited. This is the single biggest time/token saver in the workflow.
 
 ---
 

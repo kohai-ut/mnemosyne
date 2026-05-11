@@ -109,4 +109,5 @@ A full audit was performed comparing every claim in the Mnemosyne documentation 
 
 ---
 
-*Full audit methodology and reusable workflow: see AUDIT-WORKFLOW.md*
+**Full audit methodology and reusable workflow: see `docs/audit-workflow.md`**
+**Checkpoint system: `.audit-state.json` in mnemosyne-docs repo — tracks per-page audit hashes to skip unchanged pages on re-audit.**
