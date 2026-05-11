@@ -865,7 +865,7 @@ def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]
         fts_query = safe_query
     
     rows = conn.execute(
-        "SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank LIMIT ?",
+        "SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank, rowid LIMIT ?",
         (fts_query, k)
     ).fetchall()
     return [{"rowid": r["rowid"], "rank": r["rank"]} for r in rows]
@@ -896,7 +896,7 @@ def _fts_search_working(conn: sqlite3.Connection, query: str, k: int = 20) -> Li
         fts_query = safe_query
     
     rows = conn.execute(
-        "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank LIMIT ?",
+        "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?",
         (fts_query, k)
     ).fetchall()
 
@@ -906,7 +906,7 @@ def _fts_search_working(conn: sqlite3.Connection, query: str, k: int = 20) -> Li
     if not rows and _BEAM_MODE and len(content_words) > 1:
         fts_query_fallback = " OR ".join(content_words)
         rows = conn.execute(
-            "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank LIMIT ?",
+            "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?",
             (fts_query_fallback, k)
         ).fetchall()
 
@@ -2300,7 +2300,7 @@ class BeamMemory:
         # Try FTS5 search first
         try:
             fts_rows = cursor.execute(
-                "SELECT rowid, rank FROM fts_facts WHERE fts_facts MATCH ? ORDER BY rank LIMIT ?",
+                "SELECT rowid, rank FROM fts_facts WHERE fts_facts MATCH ? ORDER BY rank, rowid LIMIT ?",
                 (query, top_k * 3)
             ).fetchall()
         except Exception:
