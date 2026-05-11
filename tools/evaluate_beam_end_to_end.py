@@ -477,7 +477,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         if not batch_items:
             continue
 
-        beam.remember_batch(batch_items)
+        batch_ids = beam.remember_batch(batch_items)
         stats["wm_count"] += len(batch_items)
 
         # Cloud fact extraction: extract facts from batch if enabled
@@ -523,38 +523,54 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         # corpus was destroyed at ingest.
         #
         # Post-E1 (option b, depends on E3 additive sleep): backdate
-        # the batch's just-inserted rows past sleep's TTL/2 cutoff
-        # and let beam.sleep() produce real LLM-generated (or AAAK-
-        # fallback) summaries on top of preserved originals. The
-        # benchmark now exercises the real ingest pipeline.
+        # ONLY the batch's just-inserted rows past sleep's TTL/2
+        # cutoff and let beam.sleep() produce real LLM-generated (or
+        # AAAK-fallback) summaries on top of preserved originals.
+        # The scoped UPDATE prevents cross-batch timestamp
+        # contamination — without the `id IN (...)` filter, a
+        # mid-sleep failure on batch N would let batch N+1's UPDATE
+        # walk every still-unconsolidated row in the session and
+        # rewrite their timestamps, corrupting per-row temporal
+        # ordering. See E1 adversarial review F1/F3.
         try:
             cursor = beam.conn.cursor()
-            # Backdate the batch's working_memory rows so sleep's
-            # cutoff (WORKING_MEMORY_TTL_HOURS // 2 — typically 12h)
-            # picks them up. Real users don't need this — the
-            # cutoff is what gates "old enough to consolidate."
-            # The benchmark is processing a corpus all at once, so
-            # we explicitly tell sleep "treat this batch as old."
+            # Backdate is derived from WORKING_MEMORY_TTL_HOURS so it
+            # survives operator config changes via env var. sleep()'s
+            # cutoff is TTL/2, _trim's cutoff is TTL — backdating by
+            # TTL+1 ensures the row is on the consolidatable side of
+            # sleep's cutoff while staying outside the trim window's
+            # safety margin (consolidated_at exempts from trim post-E3
+            # anyway, so the trim concern only applies pre-sleep). See
+            # E1 adversarial review F6.
+            from mnemosyne.core.beam import WORKING_MEMORY_TTL_HOURS as _WM_TTL
             backdate_iso = (
-                datetime.now() - timedelta(hours=24)
+                datetime.now() - timedelta(hours=_WM_TTL + 1)
             ).isoformat()
-            cursor.execute(
-                "UPDATE working_memory SET timestamp = ? "
-                "WHERE session_id = ? AND consolidated_at IS NULL",
-                (backdate_iso, beam.session_id),
-            )
-            beam.conn.commit()
+            if batch_ids:
+                placeholders = ",".join("?" * len(batch_ids))
+                cursor.execute(
+                    f"UPDATE working_memory SET timestamp = ? "
+                    f"WHERE id IN ({placeholders}) "
+                    f"AND consolidated_at IS NULL",
+                    (backdate_iso, *batch_ids),
+                )
+                beam.conn.commit()
 
-            result = beam.sleep(dry_run=False)
-            if result.get("status") == "consolidated":
-                stats["ep_count"] += int(result.get("summaries_created", 0) or 0)
-            # E3 contract: originals stay, so stats["wm_count"] does
-            # NOT decrement. Pre-E1 we did stats["wm_count"] -= ...
-            # which produced wm_count=0 always; post-E1 it grows
-            # monotonically with input message count, which is what
-            # the experiment actually wants to measure.
-        except Exception:
-            pass
+                result = beam.sleep(dry_run=False)
+                if result.get("status") == "consolidated":
+                    stats["ep_count"] += int(result.get("summaries_created", 0) or 0)
+                # E3 contract: originals stay, so stats["wm_count"]
+                # does NOT decrement. Pre-E1 we did stats["wm_count"]
+                # -= ... which produced wm_count=0 always; post-E1 it
+                # grows monotonically with input message count, which
+                # is what the experiment actually wants to measure.
+        except Exception as e:
+            # Log the failure to stats so the operator sees it. Pre-E1
+            # the equivalent block also swallowed silently, but the
+            # consolidation IS the point of the experiment — a silent
+            # benchmark that "succeeds" with 0 episodic rows is the
+            # exact failure mode the test suite is supposed to catch.
+            stats.setdefault("sleep_errors", []).append(repr(e))
 
     stats["ingest_time_ms"] = (time.perf_counter() - start_time) * 1000
     return stats

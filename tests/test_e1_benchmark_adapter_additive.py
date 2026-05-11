@@ -205,10 +205,57 @@ class TestE1AdditiveBenchmarkIngest:
             f"backdate step is off"
         )
 
+    def test_backdate_does_not_clobber_other_batches(self, temp_db, disable_llm):
+        """[E1 adversarial F1/F3] The per-batch backdate UPDATE must
+        scope to the current batch's ids. If it walked every
+        consolidated_at-IS-NULL row in the session it would clobber
+        timestamps from prior batches whose sleep partially failed,
+        AND would silently mutate any pre-existing user data sharing
+        the session_id. Test: seed a row outside the benchmark's
+        ingestion path, run the benchmark with messages in the same
+        session, verify the seeded row's timestamp is untouched."""
+        adapter = _import_benchmark_adapter()
+        beam = BeamMemory(session_id="e1-scope", db_path=temp_db)
+
+        # Pre-seed a row in the SAME session, with a current timestamp.
+        # This represents a row that arrived through some other path
+        # (real-user write, prior partial-failed sleep, hand edit).
+        pre_seed_ts = datetime.now().isoformat()
+        beam.conn.execute(
+            "INSERT INTO working_memory "
+            "(id, content, source, timestamp, session_id, importance, consolidated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            ("pre-seed", "pre-existing content", "user", pre_seed_ts, "e1-scope", 0.5),
+        )
+        beam.conn.commit()
+
+        # Now run the benchmark over different messages in the same session.
+        messages = _make_messages(5)
+        adapter.ingest_conversation(beam, messages)
+
+        # Pre-seeded row's timestamp must be untouched.
+        seeded_ts = sqlite3.connect(str(temp_db)).execute(
+            "SELECT timestamp FROM working_memory WHERE id = 'pre-seed'"
+        ).fetchone()[0]
+        assert seeded_ts == pre_seed_ts, (
+            f"pre-seeded row's timestamp was clobbered by the batch "
+            f"backdate UPDATE: was {pre_seed_ts!r}, now {seeded_ts!r}. "
+            f"E1 backdate must scope to batch_ids, not session_id."
+        )
+
     def test_multibatch_ingest_preserves_corpus(self, temp_db, disable_llm):
         """At BATCH_SIZE boundary the loop iterates multiple times.
         Each batch must contribute its messages to working_memory and
-        its summary to episodic — no batch's content should be lost."""
+        its summary to episodic — no batch's content should be lost.
+
+        Assumptions pinned (so a future BATCH_SIZE / source-grouping
+        refactor surfaces this test as part of its blast radius):
+          - BATCH_SIZE=500 (module-level constant in the adapter)
+          - Messages alternate role between 'user' and 'assistant',
+            producing 2 source groups per batch and at least 2
+            summaries per batch via sleep's group-by-source logic
+          - 600 messages → 2 batches → ep_count >= 2 minimum
+            (typically 4 because 2 sources × 2 batches)"""
         adapter = _import_benchmark_adapter()
         # Patch BATCH_SIZE down to 5 so we exercise the multi-batch path
         # without ingesting hundreds of messages in a unit test.
