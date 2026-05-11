@@ -32,6 +32,10 @@ def register_cli(subparser):
 
     mn_cmds.add_parser("clear", help="Clear scratchpad")
 
+    doctor_cmd = mn_cmds.add_parser("doctor", help="Run diagnostics and auto-fix missing dependencies")
+    doctor_cmd.add_argument("--dry-run", action="store_true", help="Show what would be fixed without installing")
+    doctor_cmd.add_argument("--no-fix", action="store_true", help="Diagnose only, do not fix")
+
     export_cmd = mn_cmds.add_parser("export", help="Export all memories to a JSON file")
     export_cmd.add_argument("--output", "-o", type=str, required=True, help="Output JSON file path")
 
@@ -109,6 +113,38 @@ def mnemosyne_command(args):
             print("Scratchpad cleared.")
         else:
             print("Cancelled.")
+
+    elif cmd == "doctor":
+        dry_run = bool(getattr(args, "dry_run", False))
+        no_fix = bool(getattr(args, "no_fix", False))
+        try:
+            from mnemosyne.diagnose import run_diagnostics, auto_fix
+            result = run_diagnostics()
+            print("\nMnemosyne Diagnostics")
+            print("=" * 40)
+            print(f"  Checks passed: {result.get('checks_passed', 0)}/{result.get('checks_total', 0)}")
+            if result.get("key_findings"):
+                print("\n  Key findings:")
+                for finding in result["key_findings"]:
+                    print(f"    - {finding}")
+            else:
+                print("\n  No issues detected.")
+
+            if not no_fix:
+                print("\n--- Auto-fix ---")
+                fix_result = auto_fix(result.get("entries", []), dry_run=dry_run)
+                if fix_result["fixed"]:
+                    for item in fix_result["fixed"]:
+                        print(f"  ✅ {item}")
+                if fix_result["failed"]:
+                    for item in fix_result["failed"]:
+                        print(f"  ❌ {item['label']}: {item['error']}")
+                if not fix_result["fixed"] and not fix_result["failed"]:
+                    print("  Nothing to fix - all dependencies are healthy.")
+            print(f"\nFull log: {result.get('log_path', 'unknown')}")
+        except Exception as e:
+            print(f"Diagnostic failed: {e}")
+            return 1
 
     elif cmd == "export":
         output_path = getattr(args, "output", None)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mnemosyne CLI — v2
+Mnemosyne CLI - v2
 ==================
 Command-line interface for the Mnemosyne memory system.
 All commands use the v2 BEAM architecture (Mnemosyne/BeamMemory).
@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import NoReturn
 
-# Data directory — respects MNEMOSYNE_DATA_DIR env var
+# Data directory - respects MNEMOSYNE_DATA_DIR env var
 DATA_DIR = os.environ.get("MNEMOSYNE_DATA_DIR") or str(
     Path.home() / ".hermes" / "mnemosyne" / "data"
 )
@@ -145,15 +145,21 @@ def cmd_sleep(args):
     mem = _get_memory()
     # Use sleep_all_sessions to consolidate across ALL sessions, not just "default"
     # The per-session sleep() uses the Mnemosyne instance's session_id which is
-    # always "default" when created from CLI — causing the phantom session bug.
+    # always "default" when created from CLI - causing the phantom session bug.
     result = mem.sleep_all_sessions()
     print(f"Consolidation complete: {result}")
 
 
 def cmd_diagnose(args):
-    """Run PII-safe diagnostics."""
+    """Run PII-safe diagnostics. Use --fix to auto-install missing dependencies."""
+    fix_mode = "--fix" in args
+    dry_run = "--dry-run" in args
+
+    # Filter out flag args
+    clean_args = [a for a in args if not a.startswith("--")]
+
     try:
-        from mnemosyne.diagnose import run_diagnostics
+        from mnemosyne.diagnose import run_diagnostics, auto_fix
         result = run_diagnostics()
         print("\nMnemosyne Diagnostics\n")
         print(f"  Checks passed: {result.get('checks_passed', 0)}/{result.get('checks_total', 0)}")
@@ -163,6 +169,19 @@ def cmd_diagnose(args):
                 print(f"    - {finding}")
         else:
             print("\n  No issues detected")
+
+        if fix_mode or dry_run:
+            print("\n--- Auto-fix ---")
+            fix_result = auto_fix(result.get("entries", []), dry_run=dry_run)
+            if fix_result["fixed"]:
+                label = "Would fix" if dry_run else "Fixed"
+                for item in fix_result["fixed"]:
+                    print(f"  ✅ {item}")
+            if fix_result["failed"]:
+                for item in fix_result["failed"]:
+                    print(f"  ❌ {item['label']}: {item['error']}")
+            if not fix_result["fixed"] and not fix_result["failed"]:
+                print("  Nothing to fix - all dependencies are healthy.")
     except Exception as e:
         print(f"Diagnostic failed: {e}")
 
@@ -279,6 +298,7 @@ COMMANDS = {
     "sleep": cmd_sleep,
     "consolidate": cmd_sleep,
     "diagnose": cmd_diagnose,
+    "doctor": cmd_diagnose,
     "export": cmd_export,
     "import": cmd_import,
     "import-hindsight": cmd_import_hindsight,
@@ -290,7 +310,7 @@ COMMANDS = {
 def run_cli():
     """Main CLI entry point."""
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
-        print("Mnemosyne — Local AI Memory System\n")
+        print("Mnemosyne - Local AI Memory System\n")
         print("Usage: mnemosyne <command> [args]\n")
         print("Commands:")
         print("  store <content> [source] [importance]  Store a memory")
@@ -299,7 +319,7 @@ def run_cli():
         print("  delete <id>                            Delete a memory")
         print("  stats                                  Show statistics")
         print("  sleep                                  Run consolidation")
-        print("  diagnose                               Run diagnostics")
+        print("  diagnose [--fix] [--dry-run]          Run diagnostics (--fix auto-installs deps)")
         print("  export [file.json]                     Export memories")
         print("  import <file.json>                     Import memories")
         print("  import-hindsight <file|url> [bank]      Import Hindsight memories")
