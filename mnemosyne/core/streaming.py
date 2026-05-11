@@ -36,19 +36,61 @@ logger = logging.getLogger(__name__)
 # change to this set, not a silent ride-along via the kwarg.
 ALLOWED_DELTA_TABLES = frozenset({"working_memory", "episodic_memory"})
 
-# Columns reserved on the UPDATE path (existing-row apply). These are
-# caller-side routing / lifecycle keys that should NOT be mutated by a
-# peer:
-#   - id: row identity; UPDATE matches on it, doesn't mutate it
-#   - rowid: SQLite-assigned, never user-mutable
-#   - timestamp, created_at: row-creation history; mutating would
-#     rewrite the historical record
-_DELTA_RESERVED_UPDATE = frozenset({"id", "rowid", "timestamp", "created_at"})
+# [C25 /review hardening] Qualify table names with the main schema to
+# defeat temp-table shadowing. SQLite resolves unqualified names to
+# temp schema first; a same-connection `CREATE TEMP TABLE working_memory`
+# would make subsequent unqualified SQL target the temp shadow.
+# `main.working_memory` always resolves to the real table.
+_QUALIFIED_TABLE_NAMES = {
+    "working_memory": '"main"."working_memory"',
+    "episodic_memory": '"main"."episodic_memory"',
+}
 
-# Columns reserved on the INSERT path. Only rowid is truly off-limits
-# (SQLite auto-assigns). id / timestamp / created_at ARE the new row's
-# values when inserting — they come from the peer's record.
-_DELTA_RESERVED_INSERT = frozenset({"rowid"})
+# [C25 /review hardening — opt-in allowlist for peer mutations]
+# Pre-fix the reserved-column set was "deny known routing keys, accept
+# everything else." That accepts `session_id`, `superseded_by`,
+# `scope`, `valid_until`, etc — letting a peer reroute another
+# session's row, soft-delete victim rows, etc.
+#
+# Flipped to opt-in: only the columns a peer is allowed to set / mutate
+# are accepted. Everything else (identity, scope, lifecycle, audit) is
+# destination-controlled. Sync is content-mirror; routing is local.
+#
+# UPDATE-mutable: peer can mutate row content + sync-relevant metadata
+# fields on an EXISTING row matched by id. Identity (id), scope
+# (session_id, scope), lifecycle (valid_until, superseded_by,
+# created_at, timestamp, recall_count, last_recalled, consolidated_at,
+# degraded_at, tier), and authorship (author_id, author_type,
+# channel_id) are all destination-controlled.
+_DELTA_UPDATABLE_COLUMNS = frozenset({
+    "content",
+    "importance",
+    "metadata_json",
+    "veracity",
+    "memory_type",
+    "binary_vector",  # episodic only; harmless filter on working_memory
+    "source",
+    "summary_of",     # episodic only
+})
+
+# INSERT-acceptable: peer creates a row with content + sync-relevant
+# fields. id is the row identity (peer-supplied). Everything else
+# (lifecycle / scope / routing / audit) is filled by destination
+# defaults — a peer cannot land a row directly inside the
+# destination's local session, claim authorship, or pre-tombstone
+# a future legitimate write.
+_DELTA_INSERTABLE_COLUMNS = frozenset({
+    "id",
+    "content",
+    "importance",
+    "metadata_json",
+    "veracity",
+    "memory_type",
+    "binary_vector",
+    "source",
+    "summary_of",
+    "timestamp",  # peer's original creation time — preserves history
+})
 
 
 class EventType(Enum):
@@ -246,7 +288,8 @@ class DeltaSync:
         self.mnemosyne = mnemosyne_instance
         self.checkpoint_dir = checkpoint_dir or (Path.home() / ".hermes" / "mnemosyne" / "sync")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self._checkpoints: Dict[str, SyncCheckpoint] = {}
+        # Keyed by (peer_id, table) — see _checkpoint_path docstring.
+        self._checkpoints: Dict[Any, SyncCheckpoint] = {}
         self._lock = threading.Lock()
         # [C25] Per-table column allowlist, lazily populated from the
         # live schema via PRAGMA table_info on first use. Schema-
@@ -256,90 +299,137 @@ class DeltaSync:
         self._load_checkpoints()
 
     @staticmethod
-    def _validate_table(table: str, method: str) -> None:
+    def _validate_table(table, method: str) -> str:
         """[C25] Reject any table not in ALLOWED_DELTA_TABLES.
 
-        Pre-fix, the `table` kwarg flowed straight into f-string SQL.
-        A caller (or, more dangerously, a config-file injection) that
-        passed `table="working_memory; DROP TABLE episodic_memory; --"`
-        could execute arbitrary SQL against the local DB. The
-        allowlist is the trust boundary."""
-        if not isinstance(table, str) or table not in ALLOWED_DELTA_TABLES:
+        Returns the qualified `main.table` form for downstream SQL —
+        callers should use the returned string, NOT the raw input.
+        Returning the qualified form forces every callsite to go
+        through validation (no opportunity to forget the `main.`
+        prefix elsewhere).
+
+        Strict `type(table) is str` check (not `isinstance`) — a
+        subclass of `str` with overridden `__eq__`/`__hash__` can
+        compare-equal to an allowlisted value while carrying a
+        different actual string content. The f-string then uses the
+        carrier's content, bypassing the gate. Strict type check
+        closes this. (Caught by /review adversarial pass — empirical
+        exploit demonstrated with MyStr(str).)
+        """
+        if type(table) is not str or table not in ALLOWED_DELTA_TABLES:
             raise ValueError(
                 f"DeltaSync.{method}: table {table!r} is not in the "
                 f"allowlist {sorted(ALLOWED_DELTA_TABLES)!r}. To sync a "
                 f"new table, add it to ALLOWED_DELTA_TABLES in "
                 f"mnemosyne/core/streaming.py — silently accepting "
-                f"arbitrary table names is a security regression."
+                f"arbitrary table names is a security regression. "
+                f"(Note: strict type check; str subclasses are rejected.)"
             )
+        return _QUALIFIED_TABLE_NAMES[table]
 
     def _allowed_columns(self, table: str) -> frozenset:
         """[C25] Return the schema-derived column allowlist for `table`.
 
-        Pre-fix, the apply_delta path took every key in the incoming
-        peer-supplied delta dict and interpolated it into
-        `UPDATE table SET <key> = ?` / `INSERT INTO table (<keys>)`.
-        A malicious peer could send `{"foo; DROP TABLE x; --": "value"}`
-        and ride that into SQL. Filtering against the live schema's
-        column set is the trust boundary on the apply side.
+        Defense-in-depth filter on top of the opt-in
+        `_DELTA_INSERTABLE_COLUMNS` / `_DELTA_UPDATABLE_COLUMNS` sets:
+        an attacker who somehow lands a column name that is in both
+        the static allowlist AND the live schema still passes; that
+        intersection is small and trustworthy.
 
-        Cached after first lookup — schema reads dominate apply_delta
-        latency on large batches otherwise.
+        Validates `table` defensively in case a caller reaches this
+        method without going through `_validate_table` first
+        (`mnemosyne.delta_sync._allowed_columns(...)` etc). /review
+        flagged the direct-call path as a defense-in-depth gap.
 
-        `table` is assumed to have already passed `_validate_table`.
-        The f-string interpolation into PRAGMA is therefore safe
-        because the value is provably one of the small set of known
-        literal strings. SQLite's PRAGMA syntax does not support
-        parameter binding for table names — the allowlist is the only
-        way to safely interpolate."""
+        Uses `PRAGMA main.table_info("<table>")` to defeat temp-table
+        shadowing — SQLite resolves unqualified names to temp schema
+        first, so a same-connection `CREATE TEMP TABLE working_memory`
+        would otherwise make the PRAGMA return the temp shadow's
+        columns. The `main.` prefix + quoted identifier is the fix.
+        """
+        self._validate_table(table, "_allowed_columns")
         if table in self._column_cache:
             return self._column_cache[table]
         cursor = self.mnemosyne.conn.cursor()
-        cursor.execute(f"PRAGMA table_info({table})")  # safe: table in allowlist
+        # Both qualifier and identifier quoted — table is provably one
+        # of the small allowlist literals so this is safe.
+        cursor.execute(f'PRAGMA main.table_info("{table}")')
         cols = frozenset(row[1] for row in cursor.fetchall())
         if not cols:
             raise ValueError(
-                f"DeltaSync._allowed_columns: PRAGMA table_info({table}) "
+                f"DeltaSync._allowed_columns: PRAGMA main.table_info({table!r}) "
                 f"returned no columns. The table is in the allowlist "
                 f"but the schema is missing — was BeamMemory initialized?"
             )
         self._column_cache[table] = cols
         return cols
 
-    def _checkpoint_path(self, peer_id: str) -> Path:
-        return self.checkpoint_dir / f"checkpoint_{peer_id}.json"
+    # [C25 /review hardening] Checkpoints are scoped by (peer_id, table).
+    # rowid namespaces are table-local; a single per-peer checkpoint
+    # produced silent skip-rows on cross-table sync (peer syncs
+    # working_memory to rowid=100, then compute_delta(peer, table=
+    # episodic_memory) skipped episodic rows at rowid < 100).
+    #
+    # New filename: checkpoint_<peer>__<table>.json (double-underscore
+    # separator avoids collision with peer_id strings containing single
+    # underscores). Legacy format (checkpoint_<peer>.json without a
+    # table suffix) is loaded as the working_memory checkpoint for
+    # backward compat.
+
+    def _checkpoint_path(self, peer_id: str, table: str) -> Path:
+        return self.checkpoint_dir / f"checkpoint_{peer_id}__{table}.json"
+
+    @staticmethod
+    def _parse_checkpoint_filename(stem: str):
+        """Parse 'checkpoint_<peer>__<table>' or legacy 'checkpoint_<peer>'.
+        Returns (peer_id, table) — legacy maps to working_memory.
+        Returns None if the filename doesn't match either shape."""
+        if not stem.startswith("checkpoint_"):
+            return None
+        body = stem[len("checkpoint_"):]
+        if "__" in body:
+            peer_id, _, table = body.rpartition("__")
+            if not peer_id or not table:
+                return None
+            return peer_id, table
+        # Legacy: pre-/review-hardening files only carry peer_id.
+        return body, "working_memory"
 
     def _load_checkpoints(self) -> None:
-        """Load all saved checkpoints."""
+        """Load all saved checkpoints (both new and legacy filenames)."""
         if not self.checkpoint_dir.exists():
             return
         for f in self.checkpoint_dir.glob("checkpoint_*.json"):
-            peer_id = f.stem.replace("checkpoint_", "")
+            parsed = self._parse_checkpoint_filename(f.stem)
+            if parsed is None:
+                continue
+            peer_id, table = parsed
             try:
                 with open(f, "r") as fh:
                     data = json.load(fh)
-                self._checkpoints[peer_id] = SyncCheckpoint(**data)
+                self._checkpoints[(peer_id, table)] = SyncCheckpoint(**data)
             except Exception:
                 pass
 
-    def _save_checkpoint(self, peer_id: str) -> None:
+    def _save_checkpoint(self, peer_id: str, table: str) -> None:
         """Save checkpoint to disk."""
-        cp = self._checkpoints.get(peer_id)
+        cp = self._checkpoints.get((peer_id, table))
         if cp:
-            path = self._checkpoint_path(peer_id)
+            path = self._checkpoint_path(peer_id, table)
             with open(path, "w") as f:
                 f.write(cp.to_json())
 
-    def get_checkpoint(self, peer_id: str) -> Optional[SyncCheckpoint]:
-        """Get the current checkpoint for a peer."""
+    def get_checkpoint(self, peer_id: str, table: str = "working_memory") -> Optional[SyncCheckpoint]:
+        """Get the current checkpoint for a (peer, table) pair."""
         with self._lock:
-            return self._checkpoints.get(peer_id)
+            return self._checkpoints.get((peer_id, table))
 
-    def set_checkpoint(self, peer_id: str, checkpoint: SyncCheckpoint) -> None:
-        """Set and save a checkpoint."""
+    def set_checkpoint(self, peer_id: str, checkpoint: SyncCheckpoint,
+                       table: str = "working_memory") -> None:
+        """Set and save a checkpoint for a (peer, table) pair."""
         with self._lock:
-            self._checkpoints[peer_id] = checkpoint
-        self._save_checkpoint(peer_id)
+            self._checkpoints[(peer_id, table)] = checkpoint
+        self._save_checkpoint(peer_id, table)
 
     def compute_delta(self, peer_id: str, table: str = "working_memory") -> List[Dict[str, Any]]:
         """
@@ -351,23 +441,29 @@ class DeltaSync:
         Only `working_memory` and `episodic_memory` are accepted as
         `table` values. Other strings raise ValueError. See C25 in
         the memory-contract ledger.
+
+        Checkpoints are scoped by (peer_id, table). Pre-/review, a
+        single checkpoint per peer covered all tables — peer syncing
+        working_memory to rowid=100, then later compute_delta for
+        episodic_memory with the same peer, would skip episodic rows
+        at rowid < 100 because rowid namespaces are table-local.
         """
-        self._validate_table(table, "compute_delta")
-        checkpoint = self.get_checkpoint(peer_id)
+        qualified = self._validate_table(table, "compute_delta")
+        checkpoint = self.get_checkpoint(peer_id, table)
         conn = self.mnemosyne.conn
         cursor = conn.cursor()
 
         if checkpoint:
             # Get memories modified since last sync
             cursor.execute(f"""
-                SELECT * FROM {table}
+                SELECT * FROM {qualified}
                 WHERE rowid > ? OR timestamp > ?
                 ORDER BY rowid ASC
             """, (checkpoint.last_rowid, checkpoint.last_sync_at))
         else:
             # First sync: send everything
             cursor.execute(f"""
-                SELECT * FROM {table}
+                SELECT * FROM {qualified}
                 ORDER BY rowid ASC
             """)
 
@@ -397,8 +493,16 @@ class DeltaSync:
         `table` values. Other strings raise ValueError. See C25 in
         the memory-contract ledger.
         """
-        self._validate_table(table, "apply_delta")
-        allowed_cols = self._allowed_columns(table)
+        qualified = self._validate_table(table, "apply_delta")
+        schema_cols = self._allowed_columns(table)
+        # Defense-in-depth: only columns that are BOTH in the static
+        # opt-in allowlist AND in the live schema can be touched.
+        # Static set protects against schema-poisoning (temp tables,
+        # attached DBs, future ALTER TABLE adding sensitive columns);
+        # schema set protects against allowlist staleness if a column
+        # gets renamed.
+        updatable_cols = _DELTA_UPDATABLE_COLUMNS & schema_cols
+        insertable_cols = _DELTA_INSERTABLE_COLUMNS & schema_cols
         conn = self.mnemosyne.conn
         cursor = conn.cursor()
         stats = {"inserted": 0, "updated": 0, "skipped": 0, "filtered_keys": 0}
@@ -410,68 +514,76 @@ class DeltaSync:
                 continue
 
             # Check if exists
-            cursor.execute(f"SELECT 1 FROM {table} WHERE id = ?", (mid,))  # table validated
+            cursor.execute(f"SELECT 1 FROM {qualified} WHERE id = ?", (mid,))
             exists = cursor.fetchone() is not None
 
             if exists:
-                # Update changed fields — peer keys must be in the
-                # schema column allowlist AND not in the UPDATE
-                # reserved set (id/rowid/timestamp/created_at are
-                # caller-side routing/lifecycle keys, not user-
-                # mutable fields on an existing row).
+                # UPDATE: opt-in allowlist of mutable columns. Identity
+                # (id), scope (session_id, scope), lifecycle (valid_until,
+                # superseded_by, created_at, timestamp, recall_count,
+                # last_recalled, consolidated_at, degraded_at, tier),
+                # and authorship (author_id, author_type, channel_id)
+                # are all destination-controlled; pre-/review they
+                # leaked into UPDATE because the reserved-set was
+                # opt-out and only covered the obvious four.
                 updatable = {}
                 for k, v in mem.items():
-                    if k in _DELTA_RESERVED_UPDATE:
+                    if k == "id":
+                        # match key, not a mutation target
                         continue
-                    if k not in allowed_cols:
+                    if k not in updatable_cols:
                         stats["filtered_keys"] += 1
                         continue
                     if v is None:
                         continue
                     updatable[k] = v
                 if updatable:
-                    sets = ", ".join(f"{k} = ?" for k in updatable.keys())  # keys in allowlist
+                    # Identifier-quote each column for defense-in-depth
+                    # against schema poisoning (temp shadows, etc.).
+                    sets = ", ".join(f'"{k}" = ?' for k in updatable.keys())
                     cursor.execute(
-                        f"UPDATE {table} SET {sets} WHERE id = ?",  # table validated
+                        f"UPDATE {qualified} SET {sets} WHERE id = ?",
                         list(updatable.values()) + [mid]
                     )
                     stats["updated"] += 1
                 else:
                     stats["skipped"] += 1
             else:
-                # Insert new — same allowlist filter applies but
-                # with a narrower reserved set: only rowid is off-
-                # limits (SQLite auto-assigns). id/timestamp/
-                # created_at ARE the row's creation values from the
-                # peer's record.
+                # INSERT: opt-in allowlist. id must be present (peer
+                # supplies row identity). Destination defaults fill
+                # session_id ('default'), scope ('session'), audit
+                # columns, etc — a peer cannot land a row directly
+                # inside the destination's local session, claim
+                # authorship, or pre-tombstone via superseded_by.
                 cols = []
                 for k in mem.keys():
-                    if k in _DELTA_RESERVED_INSERT:
-                        continue
-                    if k not in allowed_cols:
+                    if k not in insertable_cols:
                         stats["filtered_keys"] += 1
                         continue
                     cols.append(k)
                 if not cols or "id" not in cols:
                     stats["skipped"] += 1
                     continue
+                quoted_cols = ", ".join(f'"{c}"' for c in cols)
                 placeholders = ", ".join("?" for _ in cols)
                 cursor.execute(
-                    f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})",  # all values gated
+                    f"INSERT INTO {qualified} ({quoted_cols}) VALUES ({placeholders})",
                     [mem.get(c) for c in cols]
                 )
                 stats["inserted"] += 1
 
         conn.commit()
 
-        # Update checkpoint
-        cursor.execute(f"SELECT MAX(rowid) FROM {table}")  # table validated
+        # Update checkpoint scoped by (peer_id, table) — rowid
+        # namespaces are table-local; a single checkpoint per peer
+        # across tables produces silent skip-rows on cross-table sync.
+        cursor.execute(f"SELECT MAX(rowid) FROM {qualified}")
         max_rowid = cursor.fetchone()[0] or 0
         self.set_checkpoint(peer_id, SyncCheckpoint(
             peer_id=peer_id,
             last_sync_at=datetime.now().isoformat(),
             last_rowid=max_rowid
-        ))
+        ), table=table)
 
         return stats
 
@@ -481,12 +593,13 @@ class DeltaSync:
         The caller is responsible for sending the delta to the peer.
         """
         delta = self.compute_delta(peer_id, table)
+        cp = self.get_checkpoint(peer_id, table)
         return {
             "peer_id": peer_id,
             "table": table,
             "delta": delta,
             "count": len(delta),
-            "checkpoint": self.get_checkpoint(peer_id).to_dict() if self.get_checkpoint(peer_id) else None
+            "checkpoint": cp.to_dict() if cp else None
         }
 
     def sync_from(self, peer_id: str, delta: List[Dict[str, Any]],
@@ -495,9 +608,10 @@ class DeltaSync:
         Full sync cycle: apply delta from peer.
         """
         stats = self.apply_delta(peer_id, delta, table)
+        cp = self.get_checkpoint(peer_id, table)
         return {
             "peer_id": peer_id,
             "table": table,
             "stats": stats,
-            "checkpoint": self.get_checkpoint(peer_id).to_dict() if self.get_checkpoint(peer_id) else None
+            "checkpoint": cp.to_dict() if cp else None
         }

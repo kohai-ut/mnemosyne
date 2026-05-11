@@ -387,16 +387,42 @@ C25 in the memory-contract ledger. To extend it, edit
 `ALLOWED_DELTA_TABLES` in `mnemosyne/core/streaming.py` (deliberate
 change, not a silent ride-along on a stray kwarg).
 
-**Column filtering on apply.** `apply_delta` filters every key in the
-incoming delta rows against the destination table's live schema.
-Keys that don't match a real column are silently dropped and counted
-in `stats["filtered_keys"]`. This handles two cases at once:
-typo'd column names from a misconfigured peer (they get filtered
-instead of crashing the batch), and malicious column names from a
-hostile peer (they can't smuggle SQL through the column-name slot).
-Reserved keys (`id`, `rowid`, `timestamp`, `created_at`) are also
-filtered out on the UPDATE path so a peer can't rewrite the
-historical lifecycle metadata of an existing row.
+**Opt-in column allowlist on apply.** `apply_delta` accepts only an
+explicit set of peer-mutable columns:
+
+- **UPDATE path** (existing row, matched by `id`): peer may mutate
+  `content`, `source`, `importance`, `metadata_json`, `veracity`,
+  `memory_type`, `binary_vector`, `summary_of`. Everything else —
+  identity (`id`), scope (`session_id`, `scope`), lifecycle
+  (`valid_until`, `superseded_by`, `created_at`, `timestamp`,
+  `recall_count`, `last_recalled`, `consolidated_at`, `degraded_at`,
+  `tier`), and authorship (`author_id`, `author_type`, `channel_id`)
+  — is destination-controlled. A peer cannot re-route a victim's
+  row to its own session, soft-delete via `superseded_by`, or
+  rewrite lifecycle history.
+- **INSERT path** (new row): peer supplies `id` + the same content/
+  metadata fields + `timestamp` (preserved as the original creation
+  time). Lifecycle / scope / authorship fall back to destination
+  column defaults — a peer cannot land a row directly inside the
+  destination's local session or claim authorship.
+
+Keys outside the allowlist are silently dropped and counted in
+`stats["filtered_keys"]` — operators can watch this counter to spot
+misconfigured peers (typo'd column names) or hostile peers
+(injection attempts in column-name slots).
+
+**Schema qualification.** All SQL operations use the `main.` schema
+prefix and quoted identifiers (`UPDATE "main"."working_memory" SET
+"content" = ?`). A same-connection temp table named `working_memory`
+cannot shadow the real table.
+
+**Per-table checkpoints.** `compute_delta` / `apply_delta` maintain
+separate checkpoints per `(peer_id, table)` pair. Pre-hardening a
+single per-peer checkpoint covered all tables, which caused silent
+skip-rows on cross-table sync because `rowid` namespaces are table-
+local. Checkpoint files are now `checkpoint_<peer>__<table>.json`;
+legacy `checkpoint_<peer>.json` files load as the `working_memory`
+checkpoint for backward compat.
 
 ---
 
