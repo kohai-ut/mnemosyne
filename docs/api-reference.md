@@ -121,10 +121,14 @@ Search memories using hybrid vector + FTS + importance scoring.
 results = mem.recall(
     query: str,                           # Search query
     top_k: int = 5,                       # Number of results
+    from_date: str = None,                # Optional lower timestamp bound
+    to_date: str = None,                  # Optional upper timestamp bound
     source: str = None,                   # Filter by source
-    threshold: float = 0.0,               # Minimum score threshold
-    scope: str = None,                    # Filter by scope
-    temporal_weight: float = 0.0,         # 0.0–1.0, boosts recent memories
+    topic: str = None,                    # Filter by topic metadata
+    author_id: str = None,                # Filter by author identity
+    author_type: str = None,              # Filter by human/agent/system author type
+    channel_id: str = None,               # Filter by channel/group
+    temporal_weight: float = 0.0,         # 0.0–1.0, boosts memories near query_time
     query_time = None,                    # datetime or ISO string for temporal calculation
     temporal_halflife: float = None,      # Hours for decay (default: 24)
     vec_weight: float = None,             # Override vector scoring weight
@@ -494,6 +498,8 @@ mnemosyne mcp --bank project_a
 
 ### MCP Tools
 
+These are the standalone MCP server tools from `mnemosyne.mcp_tools`. The Hermes plugin exposes a larger tool surface and uses `mnemosyne_stats` rather than the MCP-only `mnemosyne_get_stats` name.
+
 | Tool | Description |
 |---|---|
 | `mnemosyne_remember` | Store a memory |
@@ -575,7 +581,7 @@ When `MNEMOSYNE_HOST_LLM_ENABLED=false` or unset:
 
 **Module:** `mnemosyne.core.importers`
 
-Mnemosyne can import memories from 7 external providers. All importers preserve metadata, timestamps, and identity.
+Mnemosyne can import memories from supported external providers. All importers preserve metadata, timestamps, and identity.
 
 ### Supported Providers
 
@@ -649,8 +655,8 @@ result = import_from_provider("hindsight", mnemosyne, file_path="export.json")
 
 ```bash
 mnemosyne store "User prefers dark mode" --importance 0.9
-mnemosyne recall "user preferences" --top-k 10
-mnemosyne update <memory_id> --content "Updated content"
+mnemosyne recall "user preferences" 10
+mnemosyne update <memory_id> "Updated content"
 mnemosyne delete <memory_id>
 mnemosyne stats
 mnemosyne sleep

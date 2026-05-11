@@ -6,6 +6,7 @@ the host backend), and the registration flow added to initialize().
 
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import MagicMock, patch
 
@@ -244,3 +245,228 @@ def test_shutdown_proceeds_when_drain_times_out(caplog):
 def test_shutdown_drain_default_matches_design():
     """Production drain default should remain 2s."""
     assert MnemosyneMemoryProvider.SHUTDOWN_DRAIN_TIMEOUT_SECONDS == 2
+
+
+# ---------------------------------------------------------------------------
+# C12.b — REMEMBER_SCHEMA + _handle_remember per-call kwargs parity
+# ---------------------------------------------------------------------------
+#
+# BeamMemory.remember() accepts extract, metadata, veracity per call. The
+# plugin's REMEMBER_SCHEMA used to only expose content/importance/source/
+# scope/valid_until/extract_entities, so callers passing any of the missing
+# fields had them silently stripped:
+#   - extract=True (LLM fact-triple extraction): facts never extracted
+#   - metadata={...} (source/tag tracking): provenance lost
+#   - veracity="stated"/"tool"/...: every plugin memory defaulted to "unknown",
+#     defeating the veracity boost in recall
+# These tests lock the schema → handler → beam wiring.
+
+def test_remember_schema_advertises_extract_and_metadata_and_veracity():
+    """[C12.b] REMEMBER_SCHEMA must advertise the per-call kwargs that
+    beam.remember() actually supports, so Hermes' tool-arg validator
+    accepts them instead of stripping them as unknown fields."""
+    from hermes_memory_provider import REMEMBER_SCHEMA
+
+    props = REMEMBER_SCHEMA["parameters"]["properties"]
+    assert "extract" in props, (
+        "REMEMBER_SCHEMA missing 'extract' — LLM fact-triple extraction "
+        "is unreachable through the plugin"
+    )
+    assert "metadata" in props, (
+        "REMEMBER_SCHEMA missing 'metadata' — caller-supplied tags / "
+        "source-doc IDs get silently dropped"
+    )
+    assert "veracity" in props, (
+        "REMEMBER_SCHEMA missing 'veracity' — every plugin-stored memory "
+        "defaults to 'unknown', defeating recall's veracity weighting"
+    )
+    # Sanity-check the advertised types so a typo doesn't slip in.
+    assert props["extract"]["type"] == "boolean"
+    assert props["metadata"]["type"] == "object"
+    assert props["veracity"]["type"] == "string"
+
+
+def test_handle_remember_passes_extract_metadata_veracity_to_beam(monkeypatch):
+    """[C12.b] _handle_remember must forward extract / metadata / veracity
+    to beam.remember(). Pre-fix the args were either ignored (no .get())
+    or never wired into the beam call."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.remember.return_value = "mem-123"
+    provider._beam = beam
+
+    args = {
+        "content": "Sarah leads Project Falcon, started 2026-04-01.",
+        "extract": True,
+        "metadata": {"source_doc": "kickoff-deck.pdf", "page": 3},
+        "veracity": "stated",
+    }
+    provider._handle_remember(args)
+
+    beam.remember.assert_called_once()
+    kwargs = beam.remember.call_args.kwargs
+    assert kwargs.get("extract") is True, (
+        "extract=True was not forwarded to beam.remember — LLM fact "
+        "extraction is unreachable through the plugin tool"
+    )
+    assert kwargs.get("metadata") == {"source_doc": "kickoff-deck.pdf", "page": 3}, (
+        f"metadata not forwarded to beam.remember; got {kwargs.get('metadata')!r}"
+    )
+    assert kwargs.get("veracity") == "stated", (
+        f"veracity not forwarded to beam.remember; got {kwargs.get('veracity')!r}"
+    )
+
+
+def test_handle_remember_defaults_when_new_kwargs_omitted(monkeypatch):
+    """[C12.b] Pre-existing callers that don't pass the new kwargs must not
+    break: extract defaults False, metadata defaults None, veracity defaults
+    'unknown'. Verifies the schema bump is backward-compatible."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.remember.return_value = "mem-456"
+    provider._beam = beam
+
+    provider._handle_remember({"content": "minimal call"})
+
+    kwargs = beam.remember.call_args.kwargs
+    assert kwargs.get("extract", False) is False
+    # metadata may be None or absent; both are acceptable as "not set"
+    assert kwargs.get("metadata") in (None, {}), kwargs.get("metadata")
+    # veracity may be "unknown" (passed through) or absent (beam default)
+    assert kwargs.get("veracity", "unknown") == "unknown"
+
+
+def test_handle_remember_clamps_unknown_veracity_to_unknown(monkeypatch, caplog):
+    """[C12.b — adversarial review] An LLM typo or a caller passing a
+    non-canonical veracity label (e.g. 'STATED' capitalization, 'state'
+    truncation, 'random_garbage') must be clamped to 'unknown' at the
+    trust boundary. Beam itself does not validate; the row would persist
+    with the junk label and pollute the contamination filter
+    (`veracity != 'stated'`). Locks the handler-side allowlist."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.remember.return_value = "mem-789"
+    provider._beam = beam
+
+    # 'STATED' (capitalization) — should normalize to 'stated', not clamp.
+    provider._handle_remember({"content": "x", "veracity": "STATED"})
+    assert beam.remember.call_args.kwargs.get("veracity") == "stated"
+
+    # 'state' (truncated) — not in allowlist, must clamp to 'unknown'.
+    beam.remember.reset_mock()
+    with caplog.at_level("WARNING", logger="hermes_memory_provider"):
+        provider._handle_remember({"content": "y", "veracity": "state"})
+    assert beam.remember.call_args.kwargs.get("veracity") == "unknown"
+    assert any("unknown veracity" in r.getMessage() for r in caplog.records), (
+        "handler should log a warning when clamping a bad veracity label"
+    )
+
+    # 'random_garbage' — not in allowlist, must clamp to 'unknown'.
+    beam.remember.reset_mock()
+    provider._handle_remember({"content": "z", "veracity": "random_garbage"})
+    assert beam.remember.call_args.kwargs.get("veracity") == "unknown"
+
+
+def test_handle_remember_response_echoes_metadata(monkeypatch):
+    """[C12.b — adversarial review] The response JSON echoes extract /
+    extract_entities / veracity already; metadata should be in the same
+    surface for symmetry so callers can confirm what got applied."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.remember.return_value = "mem-meta"
+    provider._beam = beam
+
+    payload = {"content": "x", "metadata": {"source_doc": "deck.pdf", "page": 7}}
+    response = provider._handle_remember(payload)
+    parsed = json.loads(response)
+    assert parsed.get("metadata") == {"source_doc": "deck.pdf", "page": 7}, (
+        f"response missing metadata echo: {parsed!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #45 followup — RECALL_SCHEMA + _handle_recall scoring weight forwarding
+# ---------------------------------------------------------------------------
+#
+# Adversarial review of issue #45's PR caught that the Hermes-side recall
+# surface here also drops vec_weight / fts_weight / importance_weight. The
+# RECALL_SCHEMA's description literally says "50% vector + 30% FTS5 + 20%
+# importance" but never lets clients tune those weights. Same shape as the
+# C12.b REMEMBER fix in this same file — schema mismatch with what
+# BeamMemory.recall actually accepts.
+
+def test_recall_schema_advertises_scoring_weights():
+    """[issue #45 followup] RECALL_SCHEMA must advertise the per-call scoring
+    weights that BeamMemory.recall accepts (beam.py:1296-1298) so Hermes'
+    tool-arg validator accepts them instead of stripping as unknown fields."""
+    from hermes_memory_provider import RECALL_SCHEMA
+
+    props = RECALL_SCHEMA["parameters"]["properties"]
+    for key in ("vec_weight", "fts_weight", "importance_weight"):
+        assert key in props, (
+            f"RECALL_SCHEMA missing {key!r} — schema description claims "
+            f"'50% vector + 30% FTS5 + 20% importance' but never lets the "
+            f"client tune those weights"
+        )
+        assert props[key]["type"] == "number"
+
+
+def test_handle_recall_forwards_scoring_weights_to_beam(monkeypatch):
+    """[issue #45 followup] _handle_recall must forward vec_weight /
+    fts_weight / importance_weight when the caller supplies them, so the
+    schema-advertised tuning actually takes effect on ranking."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.recall.return_value = []
+    provider._beam = beam
+
+    provider._handle_recall({
+        "query": "anything",
+        "limit": 3,
+        "vec_weight": 0.55,
+        "fts_weight": 0.25,
+        "importance_weight": 0.20,
+    })
+
+    kwargs = beam.recall.call_args.kwargs
+    assert kwargs.get("vec_weight") == 0.55, (
+        f"_handle_recall did not forward vec_weight; kwargs={kwargs!r}"
+    )
+    assert kwargs.get("fts_weight") == 0.25
+    assert kwargs.get("importance_weight") == 0.20
+
+
+def test_handle_recall_omits_weights_when_caller_does_not_supply():
+    """[issue #45 followup] When caller omits the weight kwargs, the handler
+    must NOT pass spurious values to beam.recall — beam treats None as
+    "fall back to env var or default" via _normalize_weights, and forcing
+    0.0 / 0.5 / etc. would override that resolution."""
+    from hermes_memory_provider import MnemosyneMemoryProvider
+
+    provider = MnemosyneMemoryProvider()
+    beam = MagicMock()
+    beam.recall.return_value = []
+    provider._beam = beam
+
+    provider._handle_recall({"query": "anything", "limit": 3})
+
+    kwargs = beam.recall.call_args.kwargs
+    # Acceptable: the kwarg is not in beam.recall's call OR is explicitly None.
+    # Failing path: a numeric default like 0.5 / 0.0 leaked through.
+    for key in ("vec_weight", "fts_weight", "importance_weight"):
+        val = kwargs.get(key, "OMITTED")
+        assert val in (None, "OMITTED"), (
+            f"_handle_recall forwarded {key}={val!r} when caller omitted it; "
+            f"this overrides beam's env/default resolution. Either pass None "
+            f"or omit the kwarg entirely."
+        )

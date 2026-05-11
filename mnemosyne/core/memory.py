@@ -38,9 +38,21 @@ if os.environ.get("MNEMOSYNE_DATA_DIR"):
     DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "mnemosyne.db"
 
 
+def _default_data_dir() -> Path:
+    """Return the current default data directory, honoring runtime env changes."""
+    if os.environ.get("MNEMOSYNE_DATA_DIR"):
+        return Path(os.environ["MNEMOSYNE_DATA_DIR"])
+    return DEFAULT_DATA_DIR
+
+
+def _default_db_path() -> Path:
+    """Return the current default DB path, honoring runtime env changes."""
+    return _default_data_dir() / "mnemosyne.db"
+
+
 def _get_connection(db_path = None) -> sqlite3.Connection:
     """Get thread-local database connection"""
-    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    path = Path(db_path) if db_path else _default_db_path()
     if not hasattr(_thread_local, 'conn') or _thread_local.conn is None or getattr(_thread_local, 'db_path', None) != str(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         _thread_local.conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -124,7 +136,7 @@ class Mnemosyne:
             from mnemosyne.core.banks import BankManager
             self.db_path = BankManager().get_bank_db_path(bank)
         else:
-            self.db_path = DEFAULT_DB_PATH
+            self.db_path = _default_db_path()
 
         self.conn = _get_connection(self.db_path)
         init_db(self.db_path)
@@ -198,6 +210,37 @@ class Mnemosyne:
             memories = self.get_all_memories()
         return self.patterns.summarize_patterns(memories)
 
+    def get_all_memories(self) -> List[Dict]:
+        """Return all working + episodic rows for pattern analysis.
+
+        Scoped to the active session (and global memories), with the same
+        validity filters that get_context() and recall() apply: invalidated
+        and expired memories are excluded so retracted notes do not skew
+        pattern detection.
+        """
+        now = datetime.now().isoformat()
+        cursor = self.beam.conn.cursor()
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM working_memory
+            WHERE (session_id = ? OR scope = 'global')
+              AND (valid_until IS NULL OR valid_until > ?)
+              AND superseded_by IS NULL
+        """, (self.session_id, now))
+        rows = [dict(row) for row in cursor.fetchall()]
+        seen_ids = {r["id"] for r in rows}
+        cursor.execute("""
+            SELECT id, content, source, timestamp, session_id, importance
+            FROM episodic_memory
+            WHERE (session_id = ? OR scope = 'global')
+              AND (valid_until IS NULL OR valid_until > ?)
+              AND superseded_by IS NULL
+        """, (self.session_id, now))
+        for row in cursor.fetchall():
+            if row["id"] not in seen_ids:
+                rows.append(dict(row))
+        return rows
+
     # ─── Phase 8: Delta Sync ──────────────────────────────────────
 
     @property
@@ -248,9 +291,17 @@ class Mnemosyne:
             extract: If True, extract structured facts from content using LLM
                 and store in the AnnotationStore (kind='fact'). Default False.
         """
-        # BEAM write first (generates its own ID)
-        memory_id = self.beam.remember(content, source=source, importance=importance, metadata=metadata,
-                           valid_until=valid_until, scope=scope)
+        # BEAM write first (generates its own ID). Extract flags are passed
+        # through so BeamMemory's canonical _extract_and_store_entities and
+        # _extract_and_store_facts helpers run — these populate the `facts`
+        # table that fact_recall() queries (the wrapper used to reimplement
+        # only the triples half of extraction inline, leaving facts table
+        # writes silently skipped — see C12.a).
+        memory_id = self.beam.remember(
+            content, source=source, importance=importance, metadata=metadata,
+            valid_until=valid_until, scope=scope,
+            extract_entities=extract_entities, extract=extract,
+        )
         timestamp = datetime.now().isoformat()
 
         # Legacy dual-write with same ID (INSERT OR REPLACE for dedup safety)
@@ -274,50 +325,15 @@ class Mnemosyne:
 
         self.conn.commit()
 
-        # BEAM write (reuse the same ID so legacy and working-memory rows stay in sync)
-        self.beam.remember(content, source=source, importance=importance, metadata=metadata,
-                           valid_until=valid_until, scope=scope, memory_id=memory_id)
-
-        # Entity extraction (best-effort, never fails the memory write)
-        if extract_entities:
-            try:
-                from mnemosyne.core.entities import extract_entities_regex
-                entities = extract_entities_regex(content)
-                if entities:
-                    # Reuse BeamMemory's cached AnnotationStore — no per-call
-                    # connection opening. UNIQUE constraint on
-                    # (memory_id, kind, value) makes this idempotent under
-                    # repeated remember() with the same content.
-                    self.beam.annotations.add_many(
-                        memory_id=memory_id,
-                        kind="mentions",
-                        values=entities,
-                        source=source,
-                        confidence=0.8,
-                    )
-            except Exception:
-                pass  # Entity extraction is best-effort
-
-        # Structured fact extraction (best-effort, never fails the memory write)
-        if extract:
-            try:
-                from mnemosyne.core.extraction import extract_facts_safe
-                from mnemosyne.core.annotations import filter_facts
-                facts = extract_facts_safe(content)
-                if facts:
-                    # Match legacy filtering from TripleStore.add_facts.
-                    kept = filter_facts(facts)
-                    if kept:
-                        self.beam.annotations.add_many(
-                            memory_id=memory_id,
-                            kind="fact",
-                            values=kept,
-                            source=source,
-                            confidence=0.7,
-                        )
-            except Exception:
-                pass  # Fact extraction is best-effort
-
+        # The first BEAM write already inserted the working_memory row with
+        # the correct memory_id (we used it for the legacy dual-write above)
+        # and, because we passed extract_entities/extract through, BeamMemory
+        # already ran _extract_and_store_entities / _extract_and_store_facts
+        # to populate annotations (post-E6) and the facts table. A second
+        # beam.remember call would only re-run the dedup branch and
+        # _ingest_graph_and_veracity — duplicating gist/fact graph edges and
+        # bumping mention_count for what is a single user-level remember. So
+        # this function returns directly after the legacy write.
         return memory_id
 
     def recall(self, query: str, top_k: int = 5, *,
@@ -328,13 +344,17 @@ class Mnemosyne:
                channel_id: Optional[str] = None,
                temporal_weight: float = 0.0,
                query_time: Optional[Any] = None,
-               temporal_halflife: Optional[float] = None) -> List[Dict]:
+               temporal_halflife: Optional[float] = None,
+               vec_weight: float = None,
+               fts_weight: float = None,
+               importance_weight: float = None) -> List[Dict]:
         """
         Search memories with hybrid relevance scoring.
         Uses BEAM episodic + working memory retrieval (sqlite-vec + FTS5).
         Supports temporal filtering: from_date, to_date, source, topic.
         Supports multi-agent identity filtering: author_id, author_type, channel_id.
         Supports temporal scoring: temporal_weight, query_time, temporal_halflife.
+        Supports scoring weight overrides: vec_weight, fts_weight, importance_weight.
         """
         return self.beam.recall(query, top_k=top_k,
                                 from_date=from_date, to_date=to_date,
@@ -343,7 +363,10 @@ class Mnemosyne:
                                 channel_id=channel_id,
                                 temporal_weight=temporal_weight,
                                 query_time=query_time,
-                                temporal_halflife=temporal_halflife)
+                                temporal_halflife=temporal_halflife,
+                                vec_weight=vec_weight,
+                                fts_weight=fts_weight,
+                                importance_weight=importance_weight)
 
     def get_context(self, limit: int = 10) -> List[Dict]:
         """
@@ -374,6 +397,28 @@ class Mnemosyne:
         beam_ep = self.beam.get_episodic_stats(author_id=author_id, author_type=author_type,
                                                 channel_id=channel_id)
 
+        # Triples count — table is created lazily by TripleStore.init_triples;
+        # if it does not exist yet (no triple has ever been written), report 0.
+        # Narrow the suppression to the missing-table case so DB locks, I/O
+        # errors, and corruption are not silently turned into "0 triples".
+        triple_total = 0
+        try:
+            cursor.execute("SELECT COUNT(*) FROM triples")
+            triple_total = cursor.fetchone()[0]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+
+        # Bank list — scoped to the same data dir as this Mnemosyne instance so
+        # a per-bank or per-tmp-dir caller does not get bank names from the
+        # default ~/.hermes tree. Banks live at <data_dir>/banks/, where
+        # data_dir is the parent of self.db_path.
+        try:
+            from mnemosyne.core.banks import BankManager
+            banks = BankManager(data_dir=Path(self.db_path).parent).list_banks()
+        except Exception:
+            banks = ["default"]
+
         return {
             "total_memories": total_legacy,
             "total_sessions": sessions,
@@ -381,9 +426,11 @@ class Mnemosyne:
             "last_memory": last[0] if last else None,
             "database": str(self.db_path),
             "mode": "beam",
+            "banks": banks,
             "beam": {
                 "working_memory": beam_wm,
-                "episodic_memory": beam_ep
+                "episodic_memory": beam_ep,
+                "triples": {"total": triple_total},
             }
         }
 
@@ -549,6 +596,9 @@ class Mnemosyne:
         with open(input_path, "r", encoding="utf-8") as f:
             data = _json.load(f)
 
+        if not isinstance(data, dict):
+            raise ValueError("Import file must contain a Mnemosyne export object")
+
         # Validate — accept the two known schema versions.
         meta = data.get("mnemosyne_export", {})
         version = meta.get("version")
@@ -665,6 +715,9 @@ def recall(query: str, top_k: int = 5, *,
            temporal_weight: float = 0.0,
            query_time: Optional[Any] = None,
            temporal_halflife: Optional[float] = None,
+           vec_weight: float = None,
+           fts_weight: float = None,
+           importance_weight: float = None,
            bank: str = None) -> List[Dict]:
     """Search memories using the global instance with temporal filtering and scoring"""
     return _get_default(bank).recall(query, top_k,
@@ -672,7 +725,10 @@ def recall(query: str, top_k: int = 5, *,
                                      source=source, topic=topic,
                                      temporal_weight=temporal_weight,
                                      query_time=query_time,
-                                     temporal_halflife=temporal_halflife)
+                                     temporal_halflife=temporal_halflife,
+                                     vec_weight=vec_weight,
+                                     fts_weight=fts_weight,
+                                     importance_weight=importance_weight)
 
 
 def get_context(limit: int = 10, bank: str = None) -> List[Dict]:

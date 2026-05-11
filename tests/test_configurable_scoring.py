@@ -18,6 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import mnemosyne.core.memory as memory_module
+from mnemosyne.core.memory import Mnemosyne
 from mnemosyne.core.beam import (
     _normalize_weights,
     BeamMemory,
@@ -231,6 +233,51 @@ class TestRecallConfigurableWeights:
         results = beam.recall("content", top_k=1,
                               vec_weight=0.0, fts_weight=0.0, importance_weight=0.0)
         assert len(results) > 0
+
+
+class TestPublicRecallConfigurableWeights:
+    """Public Mnemosyne recall wrappers should expose BeamMemory scoring weights."""
+
+    def test_mnemosyne_recall_accepts_weight_params(self, temp_db):
+        """Mnemosyne.recall() should forward scoring weights to BeamMemory.recall()."""
+        mem = Mnemosyne(session_id="test", db_path=temp_db)
+        mem.remember("Python is a programming language", importance=0.8)
+
+        results = mem.recall(
+            "programming language",
+            top_k=5,
+            vec_weight=0.6,
+            fts_weight=0.3,
+            importance_weight=0.1,
+        )
+
+        assert isinstance(results, list)
+        assert len(results) > 0
+
+    def test_module_recall_accepts_weight_params(self, monkeypatch):
+        """mnemosyne.recall() module helper should expose the same scoring weights."""
+        class FakeMemory:
+            def recall(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+                return [{"id": "test", "content": "weight forwarding"}]
+
+        fake = FakeMemory()
+        monkeypatch.setattr(memory_module, "_get_default", lambda bank=None: fake)
+
+        results = memory_module.recall(
+            "weight forwarding",
+            top_k=5,
+            vec_weight=0.6,
+            fts_weight=0.3,
+            importance_weight=0.1,
+        )
+
+        assert isinstance(results, list)
+        assert len(results) > 0
+        assert fake.kwargs["vec_weight"] == 0.6
+        assert fake.kwargs["fts_weight"] == 0.3
+        assert fake.kwargs["importance_weight"] == 0.1
 
 
 # ============================================================================

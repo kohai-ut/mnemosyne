@@ -320,6 +320,10 @@ hermes mnemosyne import --input mnemosyne_backup.json
 mnemosyne import-hindsight hindsight-export.json hermes
 mnemosyne import-hindsight http://localhost:8888 hermes
 
+# The same timestamp-preserving Hindsight importer is available inside Hermes
+hermes mnemosyne import --from hindsight --file hindsight-export.json --bank hermes
+hermes mnemosyne import --from hindsight --base-url http://localhost:8888 --bank hermes
+
 # Clear scratchpad
 hermes mnemosyne clear
 ```
@@ -542,7 +546,7 @@ hermes mnemosyne import --input mnemosyne_backup.json
 
 ### Migrate from other memory providers
 
-Import directly from 7 supported providers into Mnemosyne:
+Import directly from supported providers into Mnemosyne:
 
 ```bash
 # List all supported providers
@@ -561,6 +565,10 @@ hermes mnemosyne import --from zep --api-key sk-xxx
 mnemosyne import-hindsight hindsight-export.json hermes
 mnemosyne import-hindsight http://localhost:8888 hermes
 
+# Hindsight → Mnemosyne via Hermes CLI
+hermes mnemosyne import --from hindsight --file hindsight-export.json --bank hermes
+hermes mnemosyne import --from hindsight --base-url http://localhost:8888 --bank hermes
+
 # Generate a migration script for any provider
 hermes mnemosyne import --from mem0 --generate-script --output-script migrate.py
 
@@ -572,7 +580,7 @@ hermes mnemosyne import --from zep --agentic
 
 The generic Hermes CLI exposes the common importer options. Provider-specific options are available through the Python importers; for example, offline Letta AgentFile imports can use `LettaImporter(agent_file_path="./agent.af")`.
 
-All importers preserve metadata, timestamps, user/agent identity, and relationships (graph edges → triples). Use `--dry-run` to validate without writing.
+Importers preserve source metadata where available. `HindsightImporter` uses a dedicated episodic import path to preserve original timestamps; other importers may store source timestamps in metadata while assigning a new Mnemosyne write timestamp. Use `--dry-run` to validate without writing.
 
 ---
 

@@ -90,6 +90,18 @@ if os.environ.get("MNEMOSYNE_DATA_DIR"):
     DEFAULT_DATA_DIR = Path(os.environ.get("MNEMOSYNE_DATA_DIR"))
     DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "mnemosyne.db"
 
+
+def _default_data_dir() -> Path:
+    """Return the current default data directory, honoring runtime env changes."""
+    if os.environ.get("MNEMOSYNE_DATA_DIR"):
+        return Path(os.environ["MNEMOSYNE_DATA_DIR"])
+    return DEFAULT_DATA_DIR
+
+
+def _default_db_path() -> Path:
+    """Return the current default DB path, honoring runtime env changes."""
+    return _default_data_dir() / "mnemosyne.db"
+
 # Config
 EMBEDDING_DIM = 384  # bge-small-en-v1.5
 WORKING_MEMORY_MAX_ITEMS = int(os.environ.get("MNEMOSYNE_WM_MAX_ITEMS", "10000"))
@@ -124,7 +136,7 @@ if VEC_TYPE not in ("float32", "int8", "bit"):
 
 def _get_connection(db_path: Path = None) -> sqlite3.Connection:
     """Get thread-local database connection with extensions loaded."""
-    path = db_path or DEFAULT_DB_PATH
+    path = db_path or _default_db_path()
     if not hasattr(_thread_local, 'conn') or _thread_local.conn is None or getattr(_thread_local, 'db_path', None) != str(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -873,14 +885,20 @@ def _fts_search(conn: sqlite3.Connection, query: str, k: int = 20) -> List[Dict]
         content_words = [w for w in safe_query.split() if w.lower() not in _stop_words and len(w) > 1]
         if not content_words:
             content_words = [w for w in safe_query.split() if len(w) > 1]
-        fts_query = " OR ".join(content_words)
+        # BEAM mode: if stop-word filtering leaves only 1 word, include ALL original
+        # non-stop-word tokens (not just content_words) to broaden recall
+        original_words = [w for w in query.split() if w.lower() not in _stop_words and len(w) > 1]
+        if len(content_words) <= 1 and len(original_words) > 1:
+            fts_query = " OR ".join(original_words)
+        else:
+            fts_query = " OR ".join(content_words)
         if not fts_query:
             return []
     else:
         fts_query = safe_query
     
     rows = conn.execute(
-        "SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank LIMIT ?",
+        "SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank, rowid LIMIT ?",
         (fts_query, k)
     ).fetchall()
     return [{"rowid": r["rowid"], "rank": r["rank"]} for r in rows]
@@ -911,9 +929,20 @@ def _fts_search_working(conn: sqlite3.Connection, query: str, k: int = 20) -> Li
         fts_query = safe_query
     
     rows = conn.execute(
-        "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank LIMIT ?",
+        "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?",
         (fts_query, k)
     ).fetchall()
+
+    # BEAM mode: if phrase query returns 0, fall back to individual word OR search
+    # This handles cases like "What operating system" where no single entry has
+    # all content words but individual words like "operating" or "system" may match
+    if not rows and _BEAM_MODE and len(content_words) > 1:
+        fts_query_fallback = " OR ".join(content_words)
+        rows = conn.execute(
+            "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?",
+            (fts_query_fallback, k)
+        ).fetchall()
+
     return [{"id": r["id"], "rank": r["rank"]} for r in rows]
 
 
@@ -973,7 +1002,7 @@ class BeamMemory:
         self.author_id = author_id
         self.author_type = author_type
         self.channel_id = channel_id or session_id  # default channel = session
-        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path = db_path or _default_db_path()
         self.use_cloud = use_cloud  # Enable LLM fact extraction during remember()
         self._extraction_client = None  # Lazy-loaded ExtractionClient
         self._extraction_buffer = []  # Buffer for batch extraction
@@ -985,6 +1014,15 @@ class BeamMemory:
         # who want explicit control. See:
         # - mnemosyne/migrations/e6_triplestore_split.py
         # - .hermes/ledger/memory-contract.md (E6)
+        # Also ensure the legacy `triples` table exists — the post-E6
+        # production path no longer writes to it, but external scripts
+        # (scripts/backfill_temporal_triples.py) and deprecation-period
+        # callers of TripleStore still expect the table to be present.
+        try:
+            from mnemosyne.core.triples import init_triples
+            init_triples(db_path=self.db_path)
+        except Exception:
+            pass
         self._ensure_e6_schema_with_migration()
 
         # E6: shared AnnotationStore handle reusing this BeamMemory's
@@ -1195,6 +1233,16 @@ class BeamMemory:
                   memory_type,
                   existing_id, self.session_id))
             self.conn.commit()
+            # Run the same entity/fact extraction the new-row path runs, so
+            # backfill calls — `mem.remember(same_content, extract=True)` on
+            # an already-existing row — actually populate the triples and
+            # facts tables. Without this the dedup early-return silently
+            # skips everything `extract=True` advertises, breaking the
+            # contract on duplicate-content writes (see C12.a /review note).
+            if extract_entities:
+                _extract_and_store_entities(self, existing_id, content)
+            if extract:
+                _extract_and_store_facts(self, existing_id, content, source)
             # Phase 3-4: Extract graph and consolidate veracity for dedup update
             self._ingest_graph_and_veracity(existing_id, content, source, veracity)
             return existing_id
@@ -1709,14 +1757,20 @@ class BeamMemory:
 
         for row in rows:
             content_lower = row["content"].lower()
+            content_words_list = content_lower.split()
+            content_words_set = set(content_words_list)
             if wm_ranks and row["id"] in wm_ranks:
                 normalized = 1.0 - ((wm_ranks[row["id"]] - min_rank) / rng)
                 relevance = normalized
             else:
+                # exact: query words appearing in content (substring match, not token equality)
                 exact = sum(1 for w in query_words if w in content_lower)
-                partial = sum(1 for w in query_words for cw in content_lower.split() if w in cw or cw in w)
-                # Cross-substring match: if any query word is a substring of content, or vice versa
-                cross = sum(1 for w in query_words if len(w) >= 2 for cw in content_lower.split() if len(cw) >= 2 and (w in cw or cw in w))
+                # partial: unique query words with substring match in content words (set-based, not cartesian)
+                partial = sum(1 for w in query_words if len(w) >= 2 and any(w in cw or cw in w for cw in content_words_set if len(cw) >= 2))
+                # cross: query substrings matched against content word substrings (set-based)
+                query_substr = {w for w in query_words if len(w) >= 2}
+                content_substr = {cw for cw in content_words_set if len(cw) >= 2}
+                cross = sum(1 for q in query_substr for c in content_substr if q in c or c in q)
                 # Also check if the full query is a substring of content (handles spaceless languages)
                 full_match = 1.0 if query_lower in content_lower else 0.0
                 if not full_match and content_lower in query_lower:
@@ -1994,6 +2048,15 @@ class BeamMemory:
                         "fact_match": True
                     })
 
+        # ---- Pre-compute query binary vector (Phase 5 binary voice) ----
+        query_bv = None
+        query_emb_for_bv = None
+        if _embeddings.available() and _mib is not None:
+            emb_result = _embeddings.embed_query(query)
+            if emb_result is not None:
+                query_emb_for_bv = emb_result
+                query_bv = _mib(emb_result)
+
         # ---- Episodic memory (vec + FTS5 hybrid) ----
         vec_results = {}
         max_distance = 0.0
@@ -2092,8 +2155,10 @@ class BeamMemory:
             # Phase 5: Graph + fact voices (polyphonic recall bonus)
             graph_bonus = 0.0
             fact_bonus = 0.0
+            binary_bonus = 0.0
             memory_id = row["id"]
             content_lower = row["content"].lower()
+            bv = row["binary_vector"]
             if self.episodic_graph is not None:
                 try:
                     # Count graph edges for this memory (well-connected = more relevant)
@@ -2107,23 +2172,42 @@ class BeamMemory:
                     pass
             if self.episodic_graph is not None:
                 try:
-                    # Check if facts from graph match query terms
+                    # Check if facts from graph match query terms via set-overlap
                     cursor2 = self.conn.cursor()
                     cursor2.execute(
                         "SELECT subject, predicate, object FROM facts WHERE source_msg_id = ?",
                         (memory_id,))
-                    query_lower_words = [w for w in query.lower().split() if len(w) > 2]
+                    query_word_set = {w for w in query.lower().split() if len(w) > 2}
                     match_count = 0
                     for frow in cursor2.fetchall():
-                        fact_text = f"{frow['subject']} {frow['predicate']} {frow['object']}".lower()
-                        if any(w in fact_text for w in query_lower_words):
+                        fact_tokens = {t.lower() for t in (f"{frow['subject']} {frow['predicate']} {frow['object']}").split() if len(t) > 2}
+                        if query_word_set & fact_tokens:
                             match_count += 1
                     fact_bonus = min(match_count * 0.04, 0.1)
                 except Exception:
                     pass
+            # Binary vector voice (Phase 5): re-enabled — binary vectors are now
+            # backfilled for all episodic entries. ITS discriminability improves at
+            # scale (1033 entries); clustering concern was for small synthetic sets.
+            if query_bv is not None and bv is not None:
+                try:
+                    # Compute hamming distance via XOR + popcount
+                    q_arr = np.frombuffer(query_bv, dtype=np.uint8)
+                    m_arr = np.frombuffer(bv, dtype=np.uint8)
+                    xor_arr = np.bitwise_xor(q_arr, m_arr)
+                    popcount_table = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint32)
+                    h_dist = int(np.sum(popcount_table[xor_arr]))
+                    # Sigmoid: max bonus at distance=0, bonus ~0 at distance=EMBEDDING_DIM
+                    # Use tanh for smooth falloff; bonus range [0, 0.08]
+                    normalized_dist = h_dist / EMBEDDING_DIM  # 0.0 (identical) to 1.0 (opposite)
+                    binary_bonus = 0.08 * (1.0 - np.tanh(normalized_dist * 3.0))
+                except Exception:
+                    binary_bonus = 0.0
+            else:
+                binary_bonus = 0.0
 
             score = base_score * (0.7 + 0.3 * decay)
-            score += graph_bonus + fact_bonus  # Phase 5: polyphonic bonuses
+            score += graph_bonus + fact_bonus + binary_bonus  # Phase 5: polyphonic bonuses
             # Temporal boost (Phase 3)
             if temporal_weight > 0.0:
                 t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
@@ -2162,9 +2246,15 @@ class BeamMemory:
             """, em_params)
             for row in cursor.fetchall():
                 content_lower = row["content"].lower()
-                exact = sum(1 for w in query_words if w in content_lower)
-                partial = sum(1 for w in query_words for cw in content_lower.split() if w in cw or cw in w)
-                cross = sum(1 for w in query_words if len(w) >= 2 for cw in content_lower.split() if len(cw) >= 2 and (w in cw or cw in w))
+                content_words_set = set(content_lower.split())
+                # exact: query words appearing as complete tokens in content
+                exact = sum(1 for w in query_words if w in content_words_set)
+                # partial: unique query words with substring match in content words (set-based, not cartesian)
+                partial = sum(1 for w in query_words if len(w) >= 2 and any(w in cw or cw in w for cw in content_words_set if len(cw) >= 2))
+                # cross: query substrings matched against content word substrings (set-based)
+                query_substr = {w for w in query_words if len(w) >= 2}
+                content_substr = {cw for cw in content_words_set if len(cw) >= 2}
+                cross = sum(1 for q in query_substr for c in content_substr if q in c or c in q)
                 full_match = 1.0 if query_lower in content_lower else 0.0
                 if not full_match and content_lower in query_lower:
                     full_match = 0.5
@@ -2181,9 +2271,10 @@ class BeamMemory:
                     base_score = relevance * kw_share + row["importance"] * iw
                     score = base_score * (rc_share + (1.0 - rc_share) * decay)
 
-                    # Phase 5: Graph + fact bonuses for fallback
+                    # Phase 5: Graph + fact + binary bonuses for fallback
                     graph_b = 0.0
                     fact_b = 0.0
+                    binary_b = 0.0
                     try:
                         cursor2 = self.conn.cursor()
                         cursor2.execute(
@@ -2197,16 +2288,18 @@ class BeamMemory:
                         cursor2.execute(
                             "SELECT subject, predicate, object FROM facts WHERE source_msg_id = ?",
                             (row["id"],))
-                        qlw = [w for w in query.lower().split() if len(w) > 2]
+                        q_word_set = {w for w in query.lower().split() if len(w) > 2}
                         mc = 0
                         for frow in cursor2.fetchall():
-                            ft = f"{frow['subject']} {frow['predicate']} {frow['object']}".lower()
-                            if any(w in ft for w in qlw):
+                            f_tokens = {t.lower() for t in (f"{frow['subject']} {frow['predicate']} {frow['object']}").split() if len(t) > 2}
+                            if q_word_set & f_tokens:
                                 mc += 1
                         fact_b = min(mc * 0.04, 0.1)
                     except Exception:
                         pass
-                    score += graph_b + fact_b
+                    # Binary vector bonus disabled (same reason as main path — ITS clustering)
+                    binary_b = 0.0
+                    score += graph_b + fact_b + binary_b
                     # Temporal boost (Phase 3)
                     if temporal_weight > 0.0:
                         t_boost = _temporal_boost(row["timestamp"], parsed_query_time, th_halflife)
@@ -2388,7 +2481,7 @@ class BeamMemory:
         # Try FTS5 search first
         try:
             fts_rows = cursor.execute(
-                "SELECT rowid, rank FROM fts_facts WHERE fts_facts MATCH ? ORDER BY rank LIMIT ?",
+                "SELECT rowid, rank FROM fts_facts WHERE fts_facts MATCH ? ORDER BY rank, rowid LIMIT ?",
                 (query, top_k * 3)
             ).fetchall()
         except Exception:
@@ -2430,14 +2523,25 @@ class BeamMemory:
         except Exception:
             return []
 
-        for row in fact_rows:
-            fact_text = row["object"] if row["object"] else f"{row['subject']} {row['predicate']} {row['object']}"
+        for raw_row in fact_rows:
+            # sqlite3.Row supports bracket access but not .get(); convert to
+            # dict so the column-with-default reads below work. Without this
+            # conversion fact_recall crashes the moment the facts table
+            # contains rows — a latent bug that was masked while the
+            # Mnemosyne.remember(extract=True) wrapper never populated the
+            # table (see C12.a).
+            row = dict(raw_row)
+            confidence = row.get("confidence")
+            subject = row.get("subject")
+            predicate = row.get("predicate")
+            obj = row.get("object")
+            fact_text = obj if obj else f"{subject} {predicate} {obj}"
             results.append({
                 "content": fact_text,
-                "score": row.get("confidence", 0.5),
+                "score": confidence if confidence is not None else 0.5,
                 "fact_id": row["fact_id"],
-                "subject": row.get("subject", ""),
-                "predicate": row.get("predicate", ""),
+                "subject": subject if subject is not None else "",
+                "predicate": predicate if predicate is not None else "",
             })
 
         return results
@@ -2567,12 +2671,81 @@ class BeamMemory:
             compressed += " [...]"
         return compressed
 
+    def _refresh_episodic_embedding(self, memory_id: str, rowid: int, new_content: str):
+        """Refresh dense-recall embedding stores for an episodic row whose
+        content has been mutated (degraded). Without this the
+        vec_episodes / memory_embeddings / binary_vector entries continue
+        representing the pre-mutation content, so dense recall scores
+        rows by semantics that no longer match what the row displays.
+        See C18.b in the memory-contract ledger.
+
+        - If embeddings provider is available: regenerate using the new
+          content and overwrite the existing vector store entries.
+        - If unavailable: invalidate (DELETE / NULL) the stale entries so
+          dense recall stops returning semantically misleading hits. The
+          row remains discoverable via FTS.
+        """
+        cursor = self.conn.cursor()
+
+        vec_available_now = _vec_available(self.conn)
+
+        if _embeddings.available():
+            try:
+                vec = _embeddings.embed([new_content])
+            except Exception:
+                vec = None
+            if vec is not None:
+                # vec_episodes is a sqlite-vec virtual table; vec0 doesn't
+                # support UPDATE on the embedding column reliably, so we
+                # DELETE+INSERT to refresh.
+                if vec_available_now:
+                    cursor.execute("DELETE FROM vec_episodes WHERE rowid = ?", (rowid,))
+                    _vec_insert(self.conn, rowid, vec[0].tolist())
+                else:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model)
+                        VALUES (?, ?, ?)
+                    """, (memory_id, _embeddings.serialize(vec[0]), _embeddings._DEFAULT_MODEL))
+
+                if _mib is not None:
+                    try:
+                        bv = _mib(vec[0])
+                        cursor.execute(
+                            "UPDATE episodic_memory SET binary_vector = ? WHERE id = ?",
+                            (bv, memory_id),
+                        )
+                    except Exception:
+                        pass
+                return
+
+        # Provider unavailable (or embed() returned None). Invalidate the
+        # stale entries so dense recall doesn't lie. The row keeps its
+        # FTS-searchable content and remains otherwise intact. Each DELETE
+        # is gated on the matching store's availability — vec_episodes is
+        # a sqlite-vec virtual table that doesn't exist when the extension
+        # isn't loaded, so an unconditional DELETE there raises
+        # OperationalError and the caller's broad except would silently
+        # skip the memory_embeddings cleanup too.
+        if vec_available_now:
+            cursor.execute("DELETE FROM vec_episodes WHERE rowid = ?", (rowid,))
+        cursor.execute("DELETE FROM memory_embeddings WHERE memory_id = ?", (memory_id,))
+        if _mib is not None:
+            cursor.execute(
+                "UPDATE episodic_memory SET binary_vector = NULL WHERE id = ?",
+                (memory_id,),
+            )
+
     def degrade_episodic(self, dry_run: bool = False) -> Dict:
         """Degrade old episodic memories through tier 1→2→3 compression.
 
         Tier 1 (0-TIER2_DAYS): Full detail, 1.0x recall weight
         Tier 2 (TIER2_DAYS-TIER3_DAYS): LLM-summarized, 0.5x weight
         Tier 3 (TIER3_DAYS+): Text extraction compressed, 0.25x weight
+
+        Each tier transition that mutates content also refreshes the
+        row's dense-recall embedding (or invalidates it if the embeddings
+        provider is unavailable) so vec_episodes / memory_embeddings /
+        binary_vector stay aligned with the displayed text. See C18.b.
 
         Returns summary of tier transitions performed.
         """
@@ -2585,9 +2758,10 @@ class BeamMemory:
         tier2_cutoff = (now - timedelta(days=TIER2_DAYS)).isoformat()
         tier3_cutoff = (now - timedelta(days=TIER3_DAYS)).isoformat()
 
-        # Tier 1 → Tier 2: old enough, still at tier 1
+        # Tier 1 → Tier 2: old enough, still at tier 1.
+        # rowid is selected so the embedding refresh can address vec_episodes.
         cursor.execute("""
-            SELECT id, content, importance FROM episodic_memory
+            SELECT id, rowid, content, importance FROM episodic_memory
             WHERE tier = 1 AND created_at < ?
             ORDER BY created_at ASC LIMIT ?
         """, (tier2_cutoff, DEGRADE_BATCH_SIZE))
@@ -2595,7 +2769,7 @@ class BeamMemory:
 
         # Tier 2 → Tier 3: very old, at tier 2
         cursor.execute("""
-            SELECT id, content FROM episodic_memory
+            SELECT id, rowid, content FROM episodic_memory
             WHERE tier = 2 AND created_at < ?
             ORDER BY created_at ASC LIMIT ?
         """, (tier3_cutoff, DEGRADE_BATCH_SIZE // 2))
@@ -2607,24 +2781,45 @@ class BeamMemory:
             return results
 
         # --- Degrade tier 1 → tier 2: LLM summarization ---
+        # Each row's UPDATE + embedding refresh runs inside a SAVEPOINT so
+        # a refresh failure rolls back the content mutation too. Without
+        # this the broad except below would swallow the refresh exception
+        # while leaving the UPDATE staged in the implicit transaction,
+        # which then commits at the end of degrade_episodic — producing
+        # the very content/embedding drift this fix exists to prevent
+        # (caught by /review for C18.b).
         from mnemosyne.core import local_llm
         for row in tier1_rows:
+            cursor.execute("SAVEPOINT degrade_row")
             try:
                 compressed = row["content"]
                 if local_llm.llm_available() and len(row["content"]) > 300:
                     summary = local_llm.summarize_memories([row["content"]])
                     if summary:
                         compressed = summary[:400]
+                final_content = compressed[:800]
                 cursor.execute(
                     "UPDATE episodic_memory SET content = ?, tier = 2, degraded_at = ? WHERE id = ?",
-                    (compressed[:800], now.isoformat(), row["id"])
+                    (final_content, now.isoformat(), row["id"])
                 )
+                # Only refresh the embedding when content actually changed.
+                # If LLM was unavailable and content is unchanged the
+                # existing embedding is already correct and an embed()
+                # call would be wasted.
+                if final_content != row["content"]:
+                    self._refresh_episodic_embedding(row["id"], row["rowid"], final_content)
+                cursor.execute("RELEASE degrade_row")
                 results["tier1_to_tier2"] += 1
             except Exception:
-                pass
+                try:
+                    cursor.execute("ROLLBACK TO degrade_row")
+                    cursor.execute("RELEASE degrade_row")
+                except Exception:
+                    pass
 
         # --- Degrade tier 2 → tier 3: smart extraction (keep key entities) ---
         for row in tier2_rows:
+            cursor.execute("SAVEPOINT degrade_row")
             try:
                 content = row["content"]
                 if SMART_COMPRESS and len(content) > TIER3_MAX_CHARS:
@@ -2637,9 +2832,16 @@ class BeamMemory:
                     "UPDATE episodic_memory SET content = ?, tier = 3, degraded_at = ? WHERE id = ?",
                     (compressed, now.isoformat(), row["id"])
                 )
+                if compressed != row["content"]:
+                    self._refresh_episodic_embedding(row["id"], row["rowid"], compressed)
+                cursor.execute("RELEASE degrade_row")
                 results["tier2_to_tier3"] += 1
             except Exception:
-                pass
+                try:
+                    cursor.execute("ROLLBACK TO degrade_row")
+                    cursor.execute("RELEASE degrade_row")
+                except Exception:
+                    pass
 
         self.conn.commit()
         return results
@@ -2686,10 +2888,17 @@ class BeamMemory:
 
         cursor = self.conn.cursor()
         cutoff = (datetime.now() - timedelta(hours=WORKING_MEMORY_TTL_HOURS // 2)).isoformat()
+        # COALESCE(session_id, 'default') so a "default"-session beam also
+        # consolidates rows with literal NULL session_id (which can land
+        # via imports or schema migrations). Without the COALESCE these
+        # NULL-session rows are stranded — sleep_all_sessions's GROUP BY
+        # collects them as a NULL group, maps to "default" for the loop,
+        # then beam.sleep("default") would query session_id = 'default'
+        # and miss the NULL rows. See Codex /review note for C9.
         cursor.execute(f"""
             SELECT id, content, source, timestamp, importance, metadata_json, scope, valid_until
             FROM working_memory
-            WHERE session_id = ? AND timestamp < ?
+            WHERE COALESCE(session_id, 'default') = ? AND timestamp < ?
             ORDER BY timestamp ASC
             LIMIT {SLEEP_BATCH_SIZE}
         """, (self.session_id, cutoff))
@@ -2840,9 +3049,23 @@ class BeamMemory:
             if session_id is None:
                 session_id = "default"
             try:
+                # Pass author_id/author_type so the alien-session BeamMemory
+                # tags consolidated episodic rows with the caller's authorship
+                # (e.g. a maintenance bot can audit-recall its own work).
+                #
+                # channel_id is intentionally NOT propagated. BeamMemory.__init__
+                # defaults channel_id to its own session_id when None — passing
+                # self.channel_id (which may itself be the caller's defaulted
+                # session_id) would tag alien rows with the caller's channel,
+                # creating cross-session pollution where filter by
+                # channel_id=caller surfaces alien content. Letting it default
+                # to the alien session_id is the semantically correct behavior.
+                # See C9 + adversarial review in the memory-contract ledger.
                 beam = self if session_id == self.session_id else BeamMemory(
                     session_id=session_id,
                     db_path=self.db_path,
+                    author_id=self.author_id,
+                    author_type=self.author_type,
                 )
                 result = beam.sleep(dry_run=dry_run)
                 result = dict(result)

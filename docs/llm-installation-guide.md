@@ -163,7 +163,7 @@ Expected: `Provider: mnemosyne` with `is_available: true`
 hermes tools list | grep mnemosyne
 ```
 
-Expected: 14 tools (remember, recall, stats, sleep, triple_add, triple_query, scratchpad_write, scratchpad_read, scratchpad_clear, invalidate, export, update, forget, import)
+Expected: 15 tools (remember, recall, stats, sleep, triple_add, triple_query, scratchpad_write, scratchpad_read, scratchpad_clear, invalidate, export, update, forget, import, diagnose)
 
 ### 3. Memory operations work
 
