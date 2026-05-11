@@ -280,18 +280,17 @@ class Mnemosyne:
         if extract_entities:
             try:
                 from mnemosyne.core.entities import extract_entities_regex
-                from mnemosyne.core.triples import TripleStore
+                from mnemosyne.core.annotations import AnnotationStore
                 entities = extract_entities_regex(content)
                 if entities:
-                    triples = TripleStore(db_path=self.db_path)
-                    for entity in entities:
-                        triples.add(
-                            subject=memory_id,
-                            predicate="mentions",
-                            object=entity,
-                            source=source,
-                            confidence=0.8
-                        )
+                    annotations = AnnotationStore(db_path=self.db_path)
+                    annotations.add_many(
+                        memory_id=memory_id,
+                        kind="mentions",
+                        values=entities,
+                        source=source,
+                        confidence=0.8,
+                    )
             except Exception:
                 pass  # Entity extraction is best-effort
 
@@ -299,11 +298,20 @@ class Mnemosyne:
         if extract:
             try:
                 from mnemosyne.core.extraction import extract_facts_safe
-                from mnemosyne.core.triples import TripleStore
+                from mnemosyne.core.annotations import AnnotationStore
                 facts = extract_facts_safe(content)
                 if facts:
-                    triples = TripleStore(db_path=self.db_path)
-                    triples.add_facts(memory_id, facts, source=source, confidence=0.7)
+                    # Match legacy filtering from TripleStore.add_facts.
+                    kept = [f for f in facts if f and len(f) > 10]
+                    if kept:
+                        annotations = AnnotationStore(db_path=self.db_path)
+                        annotations.add_many(
+                            memory_id=memory_id,
+                            kind="fact",
+                            values=kept,
+                            source=source,
+                            confidence=0.7,
+                        )
             except Exception:
                 pass  # Fact extraction is best-effort
 
