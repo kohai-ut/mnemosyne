@@ -26,6 +26,8 @@ Usage:
 --resume: skip already-evaluated questions from results file
 """
 
+from __future__ import annotations  # PEP 563: defer annotation eval so PEP 604 (X|None) and PEP 585 (list[str]) work on Python 3.9
+
 import argparse
 import ast
 import gc
