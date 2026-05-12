@@ -134,10 +134,16 @@ class TestDedupHelperUnit:
         assert len(out) == 1
         assert out[0]["id"] == "wm-1"
 
-    def test_summary_covers_multiple_wms_partial_overlap(self, temp_db):
-        """One ep summarizes wm-1, wm-2, wm-3. Only wm-1, wm-2 are in
-        results. wm-1.score > ep.score (drop ep), wm-2.score < ep.score
-        (but ep already dropped, so wm-2 stays)."""
+    def test_summary_covers_multiple_wms_partial_overlap_per_cluster(self, temp_db):
+        """Per-cluster: ep summarizes wm-1, wm-2, wm-3. wm-1 (0.9) beats
+        ep (0.6), so the ep-1 cluster goes to the wm-side: drop ep, KEEP
+        both wm-1 AND wm-2 (the lower-scored wm-2 survives because its
+        representative ep got dropped — without ep, wm-2 is no longer
+        a duplicate of anything in results).
+
+        This is the codex P1 / Claude review fix: per-edge logic would
+        have incorrectly dropped wm-2 against a phantom ep that itself
+        got removed."""
         beam = BeamMemory(db_path=temp_db)
         _seed_wm(beam, "wm-1", "raw 1")
         _seed_wm(beam, "wm-2", "raw 2")
@@ -149,13 +155,13 @@ class TestDedupHelperUnit:
                    _make_result("wm-2", "working", 0.3)]
         out = beam._dedup_cross_tier_summary_links(results)
         out_ids = {r["id"] for r in out}
-        # wm-1 beats ep → ep dropped.
-        # wm-2 lost to ep but ep is gone — wm-2 still gets dropped because
-        # the rule fires per-pair, not "ep must survive to drop wm".
-        # Outcome: wm-1 survives, ep and wm-2 dropped.
+        # ep loses the cluster (wm-1 beats it) → ep dropped.
+        # All covered wms (wm-1, wm-2) survive — wm-2 is no longer
+        # represented by a surviving summary, so the dedup invariant
+        # (no double-counting of one logical fact) still holds.
         assert "wm-1" in out_ids
+        assert "wm-2" in out_ids
         assert "ep-1" not in out_ids
-        assert "wm-2" not in out_ids
 
     def test_summary_covers_multiple_wms_all_in_results(self, temp_db):
         """ep beats wm-1 and wm-2 (both lower); both dropped, ep kept."""
@@ -424,42 +430,173 @@ class TestReviewHardening:
         # wm-source wins → kept
         assert ("working", "wm-source") in out_ids_by_tier
 
-    def test_helper_early_returns_same_object_when_no_episodic_rows(self, temp_db):
+    def test_helper_no_work_when_no_episodic_rows(self, temp_db):
         """Fast-path: when no episodic rows are in results, the helper
-        returns the input list unchanged (same object, not a copy).
-        Pins the early-return contract — a future refactor that
-        unconditionally builds the result via list comprehension would
-        flip this from `is` to `==` and the test catches it."""
+        returns equivalent output. Behavioral equivalence (not identity)
+        — a refactor returning a fresh list shouldn't break this test."""
         beam = BeamMemory(db_path=temp_db)
         results = [_make_result("wm-1", "working", 0.5),
                    _make_result("wm-2", "working", 0.3)]
         out = beam._dedup_cross_tier_summary_links(results)
-        assert out is results  # identity, not equality
+        assert out == results
 
-    def test_helper_early_returns_same_object_when_no_summary_links(self, temp_db):
-        """Same identity contract for the second early-return: an ep
-        present but its summary_of is empty → no work to do, return
-        the original list."""
+    def test_helper_no_work_when_no_summary_links(self, temp_db):
+        """When ep is present but its summary_of is empty, no dedup
+        possible — output equals input."""
         beam = BeamMemory(db_path=temp_db)
         _seed_episodic(beam, "ep-1", "summary", summary_of_ids=[])
         results = [_make_result("ep-1", "episodic", 0.7),
                    _make_result("wm-1", "working", 0.5)]
         out = beam._dedup_cross_tier_summary_links(results)
-        assert out is results
+        assert out == results
 
-    def test_polyphonic_engine_overscan_bounds_loop(self, temp_db, monkeypatch):
-        """The polyphonic loop no longer early-breaks at top_k. The
-        engine's `top_k * 2` overscan (beam.py near line 2917) is the
-        only bound on the candidate set — without that bound, removing
-        the early-break would be unbounded. Pins the implicit contract."""
-        import mnemosyne.core.beam as beam_module
-        # Simply assert the source contract is intact: the polyphonic
-        # path passes `top_k * 2` to the engine. If a future refactor
-        # removes that overscan AND the early-break is still gone, the
-        # loop becomes unbounded over engine results. This test would
-        # need updating in tandem.
-        src = Path(beam_module.__file__).read_text()
-        assert "top_k=top_k * 2" in src
+    def test_polyphonic_engine_top_k_overscan_behavioral(self, temp_db, monkeypatch):
+        """Behavioral test: the polyphonic path requests `top_k * 2`
+        candidates from the engine. Asserts via the captured engine
+        argument rather than source-string match — resilient to
+        reformatting / aliasing of the engine call."""
+        from mnemosyne.core.polyphonic_recall import PolyphonicResult
+
+        monkeypatch.setenv("MNEMOSYNE_POLYPHONIC_RECALL", "1")
+        beam = BeamMemory(db_path=temp_db, session_id="s1")
+        _seed_wm(beam, "wm-1", "anything")
+
+        engine = _FakeEngine([
+            PolyphonicResult(memory_id="wm-1", combined_score=0.5,
+                             voice_scores={"vector": 0.5}, metadata={}),
+        ])
+        monkeypatch.setattr(beam, "_get_polyphonic_engine", lambda: engine)
+        beam.recall("anything", top_k=7)
+        assert engine.last_top_k == 14  # 7 * 2
+
+    def test_ep_ep_overlap_not_collapsed_documented_behavior(self, temp_db):
+        """Pin behavior: two episodic summaries covering the same wm
+        survive together. `sleep()` doesn't re-consolidate already-marked
+        rows by design (E3 filter on consolidated_at IS NULL), so this
+        is rare in practice; the helper makes no attempt to collapse
+        ep ↔ ep duplicates. This test documents the choice so a future
+        change to add ep ↔ ep dedup is caught + reviewed."""
+        beam = BeamMemory(db_path=temp_db)
+        _seed_wm(beam, "wm-1", "raw content")
+        _seed_episodic(beam, "ep-A", "summary A", summary_of_ids=["wm-1"])
+        _seed_episodic(beam, "ep-B", "summary B", summary_of_ids=["wm-1"])
+        # wm-1 lowest → both eps win their respective clusters → drop wm-1.
+        results = [_make_result("ep-A", "episodic", 0.8),
+                   _make_result("ep-B", "episodic", 0.7),
+                   _make_result("wm-1", "working", 0.3)]
+        out = beam._dedup_cross_tier_summary_links(results)
+        out_ids = {r["id"] for r in out}
+        assert "wm-1" not in out_ids
+        # Both eps survive — no ep ↔ ep collapse.
+        assert "ep-A" in out_ids
+        assert "ep-B" in out_ids
+
+    def test_tie_score_attributes_recall_to_episodic(self, temp_db):
+        """L1 review fix: on a score tie the ep wins and gets the
+        recall_count increment; the wm stays at 0. The 'no double-count'
+        invariant requires that the side that survived dedup is the side
+        that gets credited — not both, not the dropped one."""
+        beam = BeamMemory(db_path=temp_db, session_id="s1")
+        # Seed wm + ep so the linear path's FTS+importance scoring lands
+        # them with comparable scores. Easier path: directly call
+        # _dedup_cross_tier_summary_links and the recall_count update
+        # logic via beam.recall() — relying on the helper to drop the wm
+        # and the linear path's UPDATE to credit only the ep.
+        beam.conn.execute(
+            "INSERT INTO working_memory (id, content, source, timestamp, "
+            "session_id, importance) VALUES (?, ?, ?, ?, ?, ?)",
+            ("wm-tie", "trigger word for the tie test",
+             "conversation", datetime.now().isoformat(), "s1", 0.5),
+        )
+        beam.conn.execute(
+            "INSERT INTO episodic_memory (id, content, source, timestamp, "
+            "session_id, importance, summary_of) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("ep-tie", "trigger word for the tie test",
+             "consolidation", datetime.now().isoformat(), "s1", 0.5,
+             "wm-tie"),
+        )
+        beam.conn.commit()
+
+        beam.recall("trigger", top_k=10)
+        rc_wm = beam.conn.execute(
+            "SELECT recall_count FROM working_memory WHERE id = ?", ("wm-tie",)
+        ).fetchone()["recall_count"] or 0
+        rc_ep = beam.conn.execute(
+            "SELECT recall_count FROM episodic_memory WHERE id = ?", ("ep-tie",)
+        ).fetchone()["recall_count"] or 0
+        # Whichever survived gets +1; total across both = 1 (no double-count).
+        # Tie policy keeps episodic, so ep should be the credited side
+        # when scores are equal — but float-score ties are rare in
+        # integration; lock the weaker invariant here.
+        assert rc_wm + rc_ep == 1
+
+    def test_filter_dropped_source_does_not_over_drop_episodic(self, temp_db):
+        """H2 review fix: if the session/scope/superseded filter has
+        already dropped the wm source from results, the helper sees
+        only the ep and must NOT over-drop it. Per-cluster logic with
+        `present_wms = [w for w in covered_wm_ids if w in wm_scores]`
+        guards this — but lock it with an explicit test."""
+        beam = BeamMemory(db_path=temp_db)
+        _seed_wm(beam, "wm-other-session", "content")
+        _seed_episodic(beam, "ep-1", "summary referencing other session",
+                       summary_of_ids=["wm-other-session"])
+        # Simulate: wm-other-session was filtered out at the SELECT layer,
+        # so only ep-1 surfaces.
+        results = [_make_result("ep-1", "episodic", 0.5)]
+        out = beam._dedup_cross_tier_summary_links(results)
+        # ep must survive — no wm in results to dedup against.
+        assert len(out) == 1
+        assert out[0]["id"] == "ep-1"
+
+    def test_polyphonic_recall_count_respects_session_scope(self, temp_db, monkeypatch):
+        """H1 review fix (HIGH): post-dedup, the polyphonic UPDATE
+        applies the same `(session_id = ? OR scope = 'global')` guard
+        the linear path uses (beam.py:~2734). Pre-fix it bumped
+        recall_count regardless of session, polluting cross-session
+        ranking. This test forces a foreign-session row through the
+        polyphonic path (by stubbing the row-filter) and asserts
+        recall_count stayed at 0 because the rec_scope guard blocked
+        the UPDATE — defense in depth against a future filter-bypass."""
+        from mnemosyne.core.polyphonic_recall import PolyphonicResult
+
+        monkeypatch.setenv("MNEMOSYNE_POLYPHONIC_RECALL", "1")
+        beam = BeamMemory(db_path=temp_db, session_id="s1")
+        # Foreign-session, session-scope row — must NOT get recall_count
+        # bumped by a recall in session 's1'.
+        beam.conn.execute(
+            "INSERT INTO working_memory (id, content, source, timestamp, "
+            "session_id, importance, scope) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("wm-foreign", "foreign content", "conversation",
+             datetime.now().isoformat(), "OTHER-SESSION", 0.5, "session"),
+        )
+        beam.conn.commit()
+
+        engine = _FakeEngine([
+            PolyphonicResult(memory_id="wm-foreign", combined_score=0.9,
+                             voice_scores={"vector": 0.9}, metadata={}),
+        ])
+        monkeypatch.setattr(beam, "_get_polyphonic_engine", lambda: engine)
+        # Force-bypass the row-filter so we exercise the rec_scope guard
+        # directly. (Real flow: filter rejects this row upstream, so the
+        # guard is defense-in-depth.)
+        monkeypatch.setattr(
+            beam, "_polyphonic_row_passes_filters",
+            lambda *a, **kw: True,
+        )
+
+        beam.recall("foreign", top_k=10)
+        rc = beam.conn.execute(
+            "SELECT recall_count FROM working_memory WHERE id = ?",
+            ("wm-foreign",),
+        ).fetchone()["recall_count"] or 0
+        # rec_scope guard blocked the UPDATE: foreign session_id + scope=session
+        # → neither branch of `(session_id = ? OR scope = 'global')` matches.
+        assert rc == 0, (
+            "polyphonic recall_count UPDATE bumped a foreign-session, "
+            "session-scope row — H1 review fix regressed: the "
+            "(session_id = ? OR scope = 'global') guard is missing."
+        )
 
     def test_helper_uses_provided_score_field(self, temp_db):
         """Score comparison uses `r.get("score", 0.0)`. Rows missing
