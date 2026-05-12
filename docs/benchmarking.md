@@ -108,7 +108,7 @@ Applied in both linear (post-FTS+vec scoring) and polyphonic (post-RRF) paths. A
 
 **Drift caveat:** these env vars override the recall multiplier in `beam.py`, but the consolidator's Bayesian compounding in `veracity_consolidation.py` does NOT honor env overrides — it reads `VERACITY_WEIGHTS` directly. Setting `MNEMOSYNE_STATED_WEIGHT=0.9` breaks the invariant "consolidated-as-N also ranks at N." `beam.py` module-load emits a single WARNING when any of these env vars are set, surfacing the drift risk.
 
-If you want to disable the multiplier entirely for an A/B baseline, setting all five to `1.0` makes the multiplier a constant — see [Future toggles](#future-toggles-needed) for the proposed cleaner `MNEMOSYNE_VERACITY_MULTIPLIER=0` flag.
+If you want to disable the multiplier entirely for an A/B baseline, set `MNEMOSYNE_VERACITY_MULTIPLIER=0` — see [A/B ablation toggles](#ab-ablation-toggles).
 
 ### Episodic tier degradation
 
@@ -250,23 +250,35 @@ The current harness does not yet emit the diagnostic snapshots or paired outcome
 
 ---
 
-## Future toggles needed
+## A/B ablation toggles
 
-The following A/B isolation knobs do **not** yet exist in code. They are tracked here so future contributors can add them or use them once added.
+Nine env-var toggles allow disabling specific components for experimental ablation. **Each defaults to ON** (production behavior preserved); set the env var to `0`/`false`/`no`/`off` (case-insensitive, whitespace-stripped) to disable. Truthy/garbage/unset values keep the feature enabled — these are opt-out flags, not opt-in.
 
-| Proposed env var | Purpose | Affects |
+The toggle helper is `mnemosyne.core.beam._env_disabled(name)` (and a mirror in `polyphonic_recall.py`). For the experiment plan's phase-by-phase usage of each toggle, see [`experiments/2026-05-12-beam-recovery-arms-abc.md`](experiments/2026-05-12-beam-recovery-arms-abc.md).
+
+| Env var | Disables when set falsy | Affects |
 |---|---|---|
-| `MNEMOSYNE_VOICE_VECTOR=0/1` | Disable polyphonic vector voice for ablation | `polyphonic_recall._vector_voice` |
-| `MNEMOSYNE_VOICE_GRAPH=0/1` | Disable polyphonic graph voice | `polyphonic_recall._graph_voice` |
-| `MNEMOSYNE_VOICE_FACT=0/1` | Disable polyphonic fact voice | `polyphonic_recall._fact_voice` |
-| `MNEMOSYNE_VOICE_TEMPORAL=0/1` | Disable polyphonic temporal voice | `polyphonic_recall._temporal_voice` |
-| `MNEMOSYNE_GRAPH_BONUS=0/1` | Disable linear-path graph-edge bonus | `beam.py` linear ep loop |
-| `MNEMOSYNE_FACT_BONUS=0/1` | Disable linear-path fact-table bonus | `beam.py` linear ep loop |
-| `MNEMOSYNE_BINARY_BONUS=0/1` | Disable linear-path binary-vector Hamming bonus | `beam.py` linear ep loop |
-| `MNEMOSYNE_VERACITY_MULTIPLIER=0/1` | Short-circuit veracity multiplier to 1.0 in both engines | `beam.py` linear + polyphonic |
-| `MNEMOSYNE_CROSS_TIER_DEDUP=0/1` | Disable `_dedup_cross_tier_summary_links` for ablation | `beam.py` linear + polyphonic |
+| `MNEMOSYNE_VOICE_VECTOR` | Polyphonic vector voice (Phase 3d ablation) | `polyphonic_recall._vector_voice` early-return |
+| `MNEMOSYNE_VOICE_GRAPH` | Polyphonic graph voice (Phase 3b) | `polyphonic_recall._graph_voice` early-return |
+| `MNEMOSYNE_VOICE_FACT` | Polyphonic fact voice (Phase 3a) | `polyphonic_recall._fact_voice` early-return |
+| `MNEMOSYNE_VOICE_TEMPORAL` | Polyphonic temporal voice (Phase 3c) | `polyphonic_recall._temporal_voice` early-return |
+| `MNEMOSYNE_GRAPH_BONUS` | Linear-path graph-edge bonus | `beam.py` ep main loop + fallback |
+| `MNEMOSYNE_FACT_BONUS` | Linear-path fact-table bonus | `beam.py` ep main loop + fallback |
+| `MNEMOSYNE_BINARY_BONUS` | Linear-path binary-vector Hamming bonus | `beam.py` ep main loop |
+| `MNEMOSYNE_VERACITY_MULTIPLIER` | Veracity multiplier (Phase 0/1) | `beam.py` linear + polyphonic |
+| `MNEMOSYNE_CROSS_TIER_DEDUP` | `_dedup_cross_tier_summary_links` (Phase 4) | `beam.py` linear + polyphonic |
 
-Each is a small implementation (~20–30 LOC plus tests). Total ~225 LOC if all nine ship as one PR. Without them, several phases of the [BEAM-recovery experiment plan](experiments/2026-05-12-beam-recovery-arms-abc.md) cannot be executed cleanly because the alternative (modifying veracity values, deleting code paths, manipulating fixture data) introduces multiple confounded variables.
+Example:
+
+```bash
+# Phase 3a: disable the polyphonic fact voice to measure its contribution
+MNEMOSYNE_VOICE_FACT=0 \
+MNEMOSYNE_POLYPHONIC_RECALL=1 \
+MNEMOSYNE_BENCHMARK_PURE_RECALL=1 \
+python tools/evaluate_beam_end_to_end.py --scales 100K --sample 3
+```
+
+Pin each toggle in your `.env` or shell environment across an A/B run. The harness preflight snapshots all `MNEMOSYNE_*` env vars into the results JSON under `metadata.config.env` so you can verify the configuration retroactively.
 
 ---
 

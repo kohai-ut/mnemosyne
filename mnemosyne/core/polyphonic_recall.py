@@ -48,6 +48,17 @@ from mnemosyne.core.veracity_consolidation import (
 )
 
 
+def _env_disabled(name: str) -> bool:
+    """A/B toggle helper: return True iff env var is set to a falsy
+    value (`0`/`false`/`no`/`off`). Used by the per-voice ablation
+    toggles. Mirrors the helper in `beam.py` so each module is
+    self-contained — duplicated rather than imported to avoid a
+    cross-module dependency for a 4-line helper.
+    """
+    val = os.environ.get(name, "").strip().lower()
+    return val in ("0", "false", "no", "off")
+
+
 @dataclass
 class RecallResult:
     """Result from a single recall voice."""
@@ -179,7 +190,13 @@ class PolyphonicRecallEngine:
         higher-similarity occurrence — without this, a memory that
         exists in both tiers post-E3 would be double-counted in RRF
         and silently cap unique candidates below `top_k=20`.
+
+        A/B toggle: `MNEMOSYNE_VOICE_VECTOR=0` disables this voice for
+        ablation experiments. Returns empty so RRF fusion sees no
+        vector contribution.
         """
+        if _env_disabled("MNEMOSYNE_VOICE_VECTOR"):
+            return []
         if query_embedding is None or np is None:
             return []
 
@@ -471,10 +488,14 @@ class PolyphonicRecallEngine:
     def _graph_voice(self, query: str) -> List[RecallResult]:
         """
         Voice 2: Episodic graph traversal.
-        
+
         Extracts entities from query, finds related memories
         through graph edges.
+
+        A/B toggle: `MNEMOSYNE_VOICE_GRAPH=0` disables this voice.
         """
+        if _env_disabled("MNEMOSYNE_VOICE_GRAPH"):
+            return []
         # Extract entities (simple noun extraction)
         entities = self._extract_entities(query)
         
@@ -505,9 +526,13 @@ class PolyphonicRecallEngine:
     def _fact_voice(self, query: str) -> List[RecallResult]:
         """
         Voice 3: Structured fact matching.
-        
+
         Matches query against consolidated facts.
+
+        A/B toggle: `MNEMOSYNE_VOICE_FACT=0` disables this voice.
         """
+        if _env_disabled("MNEMOSYNE_VOICE_FACT"):
+            return []
         # Extract potential subject from query
         words = query.lower().split()
         
@@ -553,7 +578,11 @@ class PolyphonicRecallEngine:
 
         Boosts recent memories, penalizes old ones.
         Uses exponential decay based on age.
+
+        A/B toggle: `MNEMOSYNE_VOICE_TEMPORAL=0` disables this voice.
         """
+        if _env_disabled("MNEMOSYNE_VOICE_TEMPORAL"):
+            return []
         # Check for temporal keywords
         temporal_keywords = [
             "yesterday", "today", "recent", "last", "latest",

@@ -181,6 +181,23 @@ DEGRADE_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_DEGRADE_BATCH", "100"))
 SMART_COMPRESS = os.environ.get("MNEMOSYNE_SMART_COMPRESS", "1") not in ("0", "false", "no")
 TIER3_MAX_CHARS = int(os.environ.get("MNEMOSYNE_TIER3_MAX_CHARS", "300"))
 
+
+def _env_disabled(name: str) -> bool:
+    """A/B toggle helper: return True iff the env var is explicitly
+    set to a falsy value (`0`/`false`/`no`/`off`, case-insensitive,
+    whitespace-stripped).
+
+    Used by experiment ablation toggles where the feature is ON by
+    default (production behavior) and operators can disable it
+    explicitly via env var. Distinct from `_env_truthy` from the
+    benchmark harness — that one defaults to OFF, this one defaults
+    to ON. See `docs/benchmarking.md` for the full toggle reference.
+
+    Unset / empty / non-falsy → False (feature enabled).
+    """
+    val = os.environ.get(name, "").strip().lower()
+    return val in ("0", "false", "no", "off")
+
 # Veracity weighting (memory confidence). C29: defaults come from
 # `_VW_DEFAULTS` which mirrors `veracity_consolidation.VERACITY_WEIGHTS`
 # in normal mode and falls back to a hardcoded literal in degraded-import
@@ -2888,14 +2905,18 @@ class BeamMemory:
             # vec_weight + fts_weight + importance_weight are normalized to sum to 1.0
             base_score = sim * vw + fts * fw + row["importance"] * iw
 
-            # Phase 5: Graph + fact voices (polyphonic recall bonus)
+            # Phase 5: Graph + fact voices (polyphonic recall bonus).
+            # Each block gated by an A/B toggle: `MNEMOSYNE_GRAPH_BONUS=0`,
+            # `MNEMOSYNE_FACT_BONUS=0`, `MNEMOSYNE_BINARY_BONUS=0` to
+            # disable individually for ablation. Default ON — production
+            # behavior unchanged.
             graph_bonus = 0.0
             fact_bonus = 0.0
             binary_bonus = 0.0
             memory_id = row["id"]
             content_lower = row["content"].lower()
             bv = row["binary_vector"]
-            if self.episodic_graph is not None:
+            if self.episodic_graph is not None and not _env_disabled("MNEMOSYNE_GRAPH_BONUS"):
                 try:
                     # Count graph edges for this memory (well-connected = more relevant)
                     cursor2 = self.conn.cursor()
@@ -2906,7 +2927,7 @@ class BeamMemory:
                     graph_bonus = min(edge_count * 0.02, 0.08)
                 except Exception:
                     pass
-            if self.episodic_graph is not None:
+            if self.episodic_graph is not None and not _env_disabled("MNEMOSYNE_FACT_BONUS"):
                 try:
                     # Check if facts from graph match query terms via set-overlap
                     cursor2 = self.conn.cursor()
@@ -2925,7 +2946,7 @@ class BeamMemory:
             # Binary vector voice (Phase 5): re-enabled — binary vectors are now
             # backfilled for all episodic entries. ITS discriminability improves at
             # scale (1033 entries); clustering concern was for small synthetic sets.
-            if query_bv is not None and bv is not None:
+            if query_bv is not None and bv is not None and not _env_disabled("MNEMOSYNE_BINARY_BONUS"):
                 try:
                     # Compute hamming distance via XOR + popcount
                     q_arr = np.frombuffer(query_bv, dtype=np.uint8)
@@ -3026,32 +3047,37 @@ class BeamMemory:
                     base_score = relevance * kw_share + row["importance"] * iw
                     score = base_score * (rc_share + (1.0 - rc_share) * decay)
 
-                    # Phase 5: Graph + fact + binary bonuses for fallback
+                    # Phase 5: Graph + fact + binary bonuses for fallback.
+                    # Gated by the same toggles as the main loop above
+                    # so ablation behavior is consistent across both
+                    # episodic paths.
                     graph_b = 0.0
                     fact_b = 0.0
                     binary_b = 0.0
-                    try:
-                        cursor2 = self.conn.cursor()
-                        cursor2.execute(
-                            "SELECT COUNT(*) FROM graph_edges WHERE source LIKE ? OR target LIKE ?",
-                            (f"%{row['id']}%", f"%{row['id']}%"))
-                        graph_b = min(cursor2.fetchone()[0] * 0.02, 0.08)
-                    except Exception:
-                        pass
-                    try:
-                        cursor2 = self.conn.cursor()
-                        cursor2.execute(
-                            "SELECT subject, predicate, object FROM facts WHERE source_msg_id = ?",
-                            (row["id"],))
-                        q_word_set = {w for w in query.lower().split() if len(w) > 2}
-                        mc = 0
-                        for frow in cursor2.fetchall():
-                            f_tokens = {t.lower() for t in (f"{frow['subject']} {frow['predicate']} {frow['object']}").split() if len(t) > 2}
-                            if q_word_set & f_tokens:
-                                mc += 1
-                        fact_b = min(mc * 0.04, 0.1)
-                    except Exception:
-                        pass
+                    if not _env_disabled("MNEMOSYNE_GRAPH_BONUS"):
+                        try:
+                            cursor2 = self.conn.cursor()
+                            cursor2.execute(
+                                "SELECT COUNT(*) FROM graph_edges WHERE source LIKE ? OR target LIKE ?",
+                                (f"%{row['id']}%", f"%{row['id']}%"))
+                            graph_b = min(cursor2.fetchone()[0] * 0.02, 0.08)
+                        except Exception:
+                            pass
+                    if not _env_disabled("MNEMOSYNE_FACT_BONUS"):
+                        try:
+                            cursor2 = self.conn.cursor()
+                            cursor2.execute(
+                                "SELECT subject, predicate, object FROM facts WHERE source_msg_id = ?",
+                                (row["id"],))
+                            q_word_set = {w for w in query.lower().split() if len(w) > 2}
+                            mc = 0
+                            for frow in cursor2.fetchall():
+                                f_tokens = {t.lower() for t in (f"{frow['subject']} {frow['predicate']} {frow['object']}").split() if len(t) > 2}
+                                if q_word_set & f_tokens:
+                                    mc += 1
+                            fact_b = min(mc * 0.04, 0.1)
+                        except Exception:
+                            pass
                     # Binary vector bonus disabled (same reason as main path — ITS clustering)
                     binary_b = 0.0
                     score += graph_b + fact_b + binary_b
@@ -3112,6 +3138,11 @@ class BeamMemory:
             tier_lookup = {r["id"]: (r["tier"] or 1) for r in tier_rows}
             veracity_lookup = {r["id"]: (r["veracity"] or "unknown") for r in tier_rows}
             ep_summary_of_map = {r["id"]: (r["summary_of"] or "") for r in tier_rows}
+            # A/B toggle: `MNEMOSYNE_VERACITY_MULTIPLIER=0` short-circuits
+            # the multiplier so ranking depends on hybrid score alone.
+            # Useful for Phase 0/1 ablation in the BEAM-recovery
+            # experiment. Default ON.
+            apply_veracity = not _env_disabled("MNEMOSYNE_VERACITY_MULTIPLIER")
             for r in results:
                 if r.get("tier") == "episodic":
                     ep_tier = tier_lookup.get(r["id"], 1)
@@ -3119,7 +3150,8 @@ class BeamMemory:
                     r["degradation_tier"] = ep_tier
                     r["veracity"] = ep_veracity
                     r["score"] *= weight_map.get(ep_tier, 1.0)
-                    r["score"] *= veracity_map.get(ep_veracity, UNKNOWN_WEIGHT)
+                    if apply_veracity:
+                        r["score"] *= veracity_map.get(ep_veracity, UNKNOWN_WEIGHT)
 
         # [E4] Apply the veracity multiplier to working_memory results
         # too. Pre-E4 the multiplier was episodic-only, so per-row
@@ -3128,10 +3160,11 @@ class BeamMemory:
         # batch-ingested 'stated' content didn't rank above 'unknown'.
         # The row dicts already carry "veracity" from the SELECT
         # populated earlier in this function, so no second query needed.
-        for r in results:
-            if r.get("tier") == "working":
-                wm_veracity = r.get("veracity") or "unknown"
-                r["score"] *= veracity_map.get(wm_veracity, UNKNOWN_WEIGHT)
+        if not _env_disabled("MNEMOSYNE_VERACITY_MULTIPLIER"):
+            for r in results:
+                if r.get("tier") == "working":
+                    wm_veracity = r.get("veracity") or "unknown"
+                    r["score"] *= veracity_map.get(wm_veracity, UNKNOWN_WEIGHT)
 
         results.sort(key=lambda x: x["score"], reverse=True)
         # E3.a.3: collapse (episodic_summary, working_memory_source)
@@ -3278,7 +3311,13 @@ class BeamMemory:
             `sleep()` / `forget()` between them could yield stale linkage
             data. Acceptable under SQLite WAL + busy_timeout: the worst
             case is a one-call dedup miss, not data loss.
+
+        A/B toggle: `MNEMOSYNE_CROSS_TIER_DEDUP=0` disables the dedup,
+        returning the input list unchanged. Used by the BEAM-recovery
+        Phase 4 ablation to isolate the dedup's contribution.
         """
+        if _env_disabled("MNEMOSYNE_CROSS_TIER_DEDUP"):
+            return results
         ep_ids = [r["id"] for r in results if r.get("tier") == "episodic"]
         if not ep_ids:
             return results
@@ -3507,9 +3546,13 @@ class BeamMemory:
             # flag=ON callers don't silently lose the veracity rank
             # signal or tier degradation. Veracity multiplier applies
             # to both tiers (matching the post-E4 linear behavior).
+            # A/B toggle: `MNEMOSYNE_VERACITY_MULTIPLIER=0` disables
+            # veracity scaling here too — mirroring the linear path so
+            # both arms ablate identically.
             score = r.combined_score
             row_veracity = row_dict.get("veracity") or "unknown"
-            score *= weight_map.get(row_veracity, UNKNOWN_WEIGHT)
+            if not _env_disabled("MNEMOSYNE_VERACITY_MULTIPLIER"):
+                score *= weight_map.get(row_veracity, UNKNOWN_WEIGHT)
             if row_dict.get("tier") == "episodic":
                 ep_tier = row_dict.get("degradation_tier") or 1
                 score *= tier_weight_map.get(ep_tier, 1.0)

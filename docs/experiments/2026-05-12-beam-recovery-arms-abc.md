@@ -206,7 +206,7 @@ This is the complete list of functionality the plan assumes exists but doesn't (
 
 Merging PRs #80, #82, #88, #89, #90, #91 closes most of the prerequisite footprint. PRs #83, #85, #86, #87 are also open but not strictly required for the experiment to run — they harden surrounding paths against silent failure but don't gate the test sequence itself.
 
-### Gap B — Nine A/B toggles (the big one — ~225 LOC) — ⏳ in PR A (separate)
+### Gap B — Nine A/B toggles (the big one — ~225 LOC) — ✅ closed in PR A
 
 See §6 above. Without these, phases 0, 1, 3a–3d, 3-LIN-*, and 4 cannot be run cleanly — they either change multiple variables at once or have no working knob. **Required to execute phases 0–5 as designed.**
 
