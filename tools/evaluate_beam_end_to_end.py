@@ -1055,17 +1055,34 @@ def _detect_contradictions(messages: list, question: str) -> str | None:
     return None
 
 
-def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str, 
+def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
                       conversation_messages: list = None, top_k: int = DEFAULT_TOP_K,
                       ability: str = None) -> str:
-    """Retrieve memories and have LLM answer, with context strategy based on conversation size."""
-    
+    """Retrieve memories and have LLM answer, with context strategy based on conversation size.
+
+    Set `MNEMOSYNE_BENCHMARK_PURE_RECALL=1` to disable the per-ability
+    bypass paths (TR oracle, CR contradiction injection, IE/KU
+    context→value side-index) AND the always-included RECENT
+    CONVERSATION raw-message prompt section. Pure-recall mode forces
+    every answer through the full Mnemosyne retrieval pipeline so the
+    BEAM-recovery experiment can measure each arm's recall quality
+    without contamination from harness-side oracles. Default behavior
+    (env unset or '0') preserves the existing benchmark mode.
+    """
+    # E7/E8/E9 gate: when set, the harness disables every shortcut that
+    # would let the LLM produce an answer without going through
+    # BeamMemory.recall(). The bypasses were useful for measuring
+    # LLM-ceiling-with-help on isolated abilities; the BEAM-recovery
+    # experiment instead needs to compare Arm A vs Arm B vs Arm C on
+    # the recall surface itself.
+    _pure_recall = os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes")
+
     total_msgs = len(conversation_messages) if conversation_messages else 0
-    
+
     # ---- PER-ABILITY BYPASSES (zero-LLM or augmented) ----
-    
+
     # TR (Temporal Reasoning): compute answer from extracted dates
-    if ability == 'TR' and conversation_messages:
+    if not _pure_recall and ability == 'TR' and conversation_messages:
         timeline = _extract_timeline_from_conversation(conversation_messages)
         print(f"    [TR-bypass] extracted {len(timeline)} dates from {len(conversation_messages)} msgs")
         if timeline and len(timeline) >= 2:
@@ -1085,7 +1102,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     
     # CR (Contradiction Resolution): detect contradictory statements
     _cr_context = None
-    if ability == 'CR' and conversation_messages:
+    if not _pure_recall and ability == 'CR' and conversation_messages:
         _cr_context = _detect_contradictions(conversation_messages, question)
         if _cr_context:
             print(f"    [CR-detect] FOUND contradictions, injecting context ({len(_cr_context)} chars)")
@@ -1106,8 +1123,10 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
         # ---- Phase 1: Try context→value matching for factual questions ----
         # Only use context→value for Information Extraction (IE) and Knowledge Understanding (KU).
         # MR (Multi-hop) requires reasoning across multiple messages; let full-context handle it.
+        # Gated by pure_recall — when ON, full-context mode still hits the LLM with raw
+        # conversation but skips the zero-LLM context→value shortcut.
         _FACT_ABILITIES = {'IE', 'KU'}
-        if ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
+        if not _pure_recall and ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
             _q_stop = {'when','does','do','did','what','how','where','which','who','why',
                        'is','are','was','were','can','will','would','should','could','may',
                        'the','a','an','in','on','at','to','for','of','with','my','me','i','you'}
@@ -1169,8 +1188,10 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     context_answer = None
     # Only use context→value for Information Extraction (IE) and Knowledge Understanding (KU).
     # MR (Multi-hop) requires reasoning across multiple messages; CR/TR/EO/SUM need LLM.
+    # Gated by pure_recall — when ON, IE/KU questions go through full recall+LLM
+    # rather than returning a side-indexed value directly.
     _FACT_ABILITIES = {'IE', 'KU'}
-    if ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
+    if not _pure_recall and ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
         # Build question word set (filtered like FTS5 search does)
         _q_stop = {'when','does','do','did','what','how','where','which','who','why',
                    'is','are','was','were','can','will','would','should','could','may',
@@ -1242,9 +1263,14 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     
     context = ""  # Built below from memories
 
-    # Build recent context from last N messages
+    # Build recent context from last N messages. Pure-recall mode SKIPS
+    # this entirely — the LLM sees only RETRIEVED MEMORIES, so the
+    # answer quality reflects what each arm's recall produced (rather
+    # than the harness silently leaking the last 12 raw messages into
+    # every prompt, which inflates recency-anchored answers and masks
+    # recall weakness across all arms).
     recent_parts = []
-    if conversation_messages:
+    if not _pure_recall and conversation_messages:
         recent = conversation_messages[-RECENT_CONTEXT_COUNT:]
         for msg in recent:
             role = msg.get("role", "unknown")
@@ -1595,6 +1621,12 @@ def main():
                         help="Separate LLM for judging (default: same as --model)")
     parser.add_argument("--full-context", action="store_true",
                         help="Send full conversation to LLM (ceiling test, bypasses retrieval)")
+    parser.add_argument("--pure-recall", action="store_true",
+                        help="Disable per-ability bypasses + RECENT CONVERSATION injection. "
+                             "Forces every answer through Mnemosyne recall — what the "
+                             "BEAM-recovery experiment needs to measure arm-vs-arm "
+                             "recall quality without harness-side oracle contamination. "
+                             "Equivalent to MNEMOSYNE_BENCHMARK_PURE_RECALL=1.")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from previous results file")
     parser.add_argument("--dry-run", action="store_true",
@@ -1615,6 +1647,13 @@ def main():
     if args.full_context:
         os.environ["FULL_CONTEXT_MODE"] = "1"
         print("  Mode: FULL-CONTEXT (bypassing retrieval)")
+    if args.pure_recall:
+        os.environ["MNEMOSYNE_BENCHMARK_PURE_RECALL"] = "1"
+        print("  Mode: PURE-RECALL (per-ability bypasses + RECENT CONTEXT disabled — "
+              "every answer goes through Mnemosyne recall)")
+    elif os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes"):
+        # Env var set externally — surface it so the run banner shows the mode.
+        print("  Mode: PURE-RECALL (via env var)")
     print(f"{'='*80}")
 
     # Load data
