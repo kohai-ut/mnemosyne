@@ -15,6 +15,7 @@ Hybrid ranking: 50% vector + 30% FTS rank + 20% importance.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import json
@@ -176,11 +177,21 @@ if VEC_TYPE not in ("float32", "int8", "bit"):
 
 
 def _get_connection(db_path: Path = None) -> sqlite3.Connection:
-    """Get thread-local database connection with extensions loaded."""
+    """Get thread-local database connection with extensions loaded.
+
+    Returns a `_BeamConnection` (sqlite3.Connection subclass) so
+    `remember_batch`'s enrichment loop can defer commits via
+    `_deferred_commits`. Connection is otherwise identical to a
+    plain sqlite3.Connection.
+    """
     path = db_path or _default_db_path()
     if not hasattr(_thread_local, 'conn') or _thread_local.conn is None or getattr(_thread_local, 'db_path', None) != str(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path), check_same_thread=False)
+        conn = sqlite3.connect(
+            str(path),
+            check_same_thread=False,
+            factory=_BeamConnection,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -543,6 +554,99 @@ def init_beam(db_path: Path = None):
         """)
     except (sqlite3.OperationalError, RuntimeError):
         pass  # sqlite-vec not available
+
+
+class _BeamConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass that supports deferring commits.
+
+    Used by BeamMemory so `remember_batch`'s enrichment loop can wrap
+    many sub-helper commits in a single transaction. The substores
+    (AnnotationStore, EpisodicGraph, VeracityConsolidator) each call
+    `self.conn.commit()` after their per-row writes; pre-E2-hardening
+    that produced 10-15 commits per batch row × 250K rows = millions
+    of fsync round-trips. /review army (4-source CRITICAL on commit 1)
+    estimated 3-10 hours wall clock for the BEAM-recovery benchmark.
+
+    When `_defer_commit` is True, `commit()` becomes a no-op. The
+    `_deferred_commits` context manager flips the flag, runs the
+    block, then calls `_real_commit()` once at the end (or rolls back
+    on exception).
+
+    Subclassing is required because `sqlite3.Connection.commit` is a
+    read-only C-level method — monkey-patching it raises
+    `AttributeError`. The factory= parameter on `sqlite3.connect` is
+    the supported integration point.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._defer_commit = False
+
+    def commit(self) -> None:
+        if self._defer_commit:
+            return
+        super().commit()
+
+    def _real_commit(self) -> None:
+        """Force a real commit regardless of the defer flag.
+        Used by `_deferred_commits` on successful exit."""
+        super().commit()
+
+
+@contextlib.contextmanager
+def _deferred_commits(conn: sqlite3.Connection):
+    """Suppress nested commit() calls so the caller can wrap many
+    sub-helpers in a single transaction.
+
+    Pairs with `_BeamConnection`'s `_defer_commit` flag. If the
+    passed connection isn't a `_BeamConnection` (e.g., a test
+    constructed `BeamMemory` with a raw sqlite3 connection, or a
+    legacy caller built its own conn), the context manager degrades
+    to a no-op — inner commits still fire, performance regression
+    isn't fixed for that code path but correctness is preserved.
+
+    Threading: `_BeamConnection._defer_commit` is per-connection.
+    BeamMemory uses thread-local connections (see _get_connection),
+    so the flag is visible only to the calling thread. A future
+    refactor that shares the connection across threads would need
+    a lock here.
+    """
+    is_beam_conn = isinstance(conn, _BeamConnection)
+    if not is_beam_conn:
+        # Degrade gracefully: inner commits fire as before. This
+        # keeps the path callable from tests that build conns
+        # manually but loses the batching perf win on that code path.
+        yield
+        return
+
+    conn._defer_commit = True
+    try:
+        yield
+    except Exception:
+        conn._defer_commit = False
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    else:
+        conn._defer_commit = False
+        try:
+            conn._real_commit()
+        except sqlite3.Error as exc:
+            logger.error(
+                "_deferred_commits: final commit failed: %s; "
+                "rolling back the buffered transaction",
+                exc,
+            )
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+    finally:
+        # Defense in depth: clear the flag on any control-flow path.
+        conn._defer_commit = False
 
 
 def _generate_id(content: str) -> str:
@@ -1423,7 +1527,9 @@ class BeamMemory:
     def remember_batch(self, items: List[Dict],
                        *,
                        veracity: Optional[str] = None,
-                       force_veracity: bool = False) -> List[str]:
+                       force_veracity: bool = False,
+                       extract_entities: bool = False,
+                       extract: bool = False) -> List[str]:
         """
         Batch insert into working_memory for high-throughput ingestion.
         Each item dict should have keys: content, source, importance,
@@ -1464,9 +1570,51 @@ class BeamMemory:
         scorer at beam.py::recall now applies the multiplier to
         working_memory hits too, so per-row veracity differentiates
         scores at the experiment level.
+
+        E2 — Enrichment parity with `remember()`:
+            Post-E2 this method runs the same post-insert enrichment
+            pipeline `remember()` runs unconditionally:
+              - `_add_temporal_triple` writes the row's date as an
+                `occurred_on` annotation + the source kind as a
+                `has_source` annotation (zero-LLM, just date string
+                slicing).
+              - `_ingest_graph_and_veracity` runs pattern-based gist +
+                fact extraction via `EpisodicGraph` and consolidates
+                the extracted facts into `consolidated_facts` weighted
+                by per-row veracity (`VeracityConsolidator`). Zero LLM
+                — rule-based / regex pattern matching only.
+
+            Without this fix any high-throughput ingest path bypassed
+            the enrichment layer entirely, leaving the polyphonic
+            engine's `graph` and `fact` voices with no data to fuse —
+            E5's RRF over 4 voices collapsed to 2 voices in practice.
+
+        extract_entities (default False): opt-in regex entity scan
+            via `_extract_and_store_entities`. Cheap but generates
+            additional annotation rows; off by default to keep batch
+            ingest stable for non-experiment callers.
+
+        extract (default False): opt-in LLM-based structured fact
+            extraction via `_extract_and_store_facts`. Real cloud-API
+            cost per row; off by default. The BEAM-recovery experiment
+            arm that tests LLM enrichment sets this True.
+
+        New behavior change for existing batch callers: the always-on
+        pattern-based enrichment now adds ~ms-per-row CPU cost (regex
+        + a few SQLite inserts). For typical importers (10k-100k
+        rows) this is a few seconds of additional latency; for the
+        BEAM benchmark's 250k-message ingest, ~minutes. Documented in
+        CHANGELOG.
         """
         cursor = self.conn.cursor()
         ids = []
+        # Carry per-row source + veracity through to enrichment so we
+        # don't re-derive them post-insert. Keyed by memory_id rather
+        # than indexed-by-position (post-/review M4 — dict eliminates
+        # the parallel-list class of refactor bug, and works under
+        # python -O where the prior `assert mid_check == memory_id`
+        # would have stripped).
+        meta_by_id: Dict[str, Tuple[str, str]] = {}  # mid → (source, veracity)
         timestamp = datetime.now().isoformat()
         # Clamp the method-level default once, not per row — operators
         # who pass a bad default should see one warning, not N.
@@ -1505,6 +1653,8 @@ class BeamMemory:
                 )
             else:
                 item_veracity = default_veracity
+            item_source = item.get("source", "conversation")
+            meta_by_id[memory_id] = (item_source, item_veracity)
             cursor.execute("""
                 INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, metadata_json,
                 author_id, author_type, channel_id, memory_type, veracity)
@@ -1512,7 +1662,7 @@ class BeamMemory:
             """, (
                 memory_id,
                 item["content"],
-                item.get("source", "conversation"),
+                item_source,
                 timestamp,
                 self.session_id,
                 item.get("importance", 0.5),
@@ -1524,7 +1674,7 @@ class BeamMemory:
                 item_veracity,
             ))
         self.conn.commit()
-        
+
         # Generate vector embeddings for working memory hybrid search
         if _embeddings.available():
             try:
@@ -1540,7 +1690,79 @@ class BeamMemory:
                         )
             except Exception:
                 pass  # Vector embedding is best-effort, non-blocking
-        
+
+        # E2: per-row enrichment pipeline. Mirrors remember()'s
+        # post-insert sequence at beam.py:1406 + 1417 + 1419.
+        # Always-on rule-based parts plus opt-in entity/LLM-extraction
+        # paths plus MEMORY_ADDED event emission (parity with
+        # remember()). Run AFTER the bulk INSERT + commit so a failure
+        # in any single row's enrichment doesn't roll back the whole
+        # batch. Each helper already handles its own exceptions
+        # internally; they're best-effort by design.
+        #
+        # Performance: the enrichment helpers
+        # (AnnotationStore.add, EpisodicGraph.store_gist /
+        # store_fact / add_edge, VeracityConsolidator.consolidate_fact)
+        # each call self.conn.commit() at the end of their work. At
+        # benchmark scale that produces 10-15 commits per row × N rows
+        # — millions of fsync round-trips for the BEAM-recovery
+        # 250K-message ingest (estimated 3-10 hours wall clock pre-fix).
+        # /review caught this as 4-source CRITICAL. Wrapping the whole
+        # loop in _deferred_commits restores the bulk-insert
+        # transaction discipline: inner commit() calls become no-ops
+        # and a single explicit commit fires at the end.
+        with _deferred_commits(self.conn):
+            for memory_id, item in zip(ids, items):
+                src, ver = meta_by_id[memory_id]
+                content = item["content"]
+                # Each row's enrichment is wrapped in try/except so a
+                # genuinely buggy helper doesn't tear down the whole
+                # batch (best-effort contract — the helpers themselves
+                # already swallow their internal errors, but defense
+                # in depth at the loop level keeps later rows alive
+                # if any helper is monkey-patched / replaced).
+                try:
+                    # Always-on: temporal annotations + graph + veracity
+                    # consolidation. Zero-LLM. Mirrors remember() exactly.
+                    self._add_temporal_triple(memory_id, timestamp, src, content)
+                    self._ingest_graph_and_veracity(memory_id, content, src, ver)
+                    # Opt-in: regex entity extraction.
+                    if extract_entities:
+                        _extract_and_store_entities(self, memory_id, content)
+                    # Opt-in: LLM-based fact extraction.
+                    if extract:
+                        _extract_and_store_facts(self, memory_id, content, src)
+                except Exception as exc:
+                    # Log + continue. Pre-fix the helpers' own internal
+                    # try/except was the only guard, so a future
+                    # refactor that strips one of those internals would
+                    # break the whole batch. Outer guard keeps the
+                    # "later rows survive a bad row" contract.
+                    logger.warning(
+                        "remember_batch enrichment failed for %s: %s",
+                        memory_id, exc,
+                    )
+                # Parity with remember(): emit MEMORY_ADDED so any
+                # streaming consumer (DeltaSync, observability hooks,
+                # live UI updates) sees batch ingest events. Pre-/review
+                # only single-remember() rows produced events; batch
+                # rows were silent. Claude adversarial flagged this as
+                # a CRITICAL parity gap with the diff's stated goal.
+                # Outside the enrichment try/except — event emission is
+                # cheap and shouldn't be skipped just because a regex
+                # extractor flaked.
+                try:
+                    self._emit_event(
+                        "MEMORY_ADDED",
+                        memory_id,
+                        content=content,
+                        source=src,
+                        importance=item.get("importance", 0.5),
+                        metadata=item.get("metadata"),
+                    )
+                except Exception:
+                    pass
+
         self._trim_working_memory()
         return ids
 
