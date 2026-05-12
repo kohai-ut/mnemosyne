@@ -5,9 +5,11 @@ Comprehensive backup, restore, and integrity verification for Mnemosyne.
 """
 
 import gzip
+import io
 import json
 import hashlib
 import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -41,10 +43,25 @@ def create_backup(db_path: Path = None, backup_dir: Path = None) -> Dict:
     backup_name = f"mnemosyne_backup_{timestamp}.db.gz"
     backup_path = backup_dir / backup_name
     
-    # Compress database
-    with open(db_path, 'rb') as f_in:
-        with gzip.open(backup_path, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    # Use sqlite3 online backup API instead of shutil.copyfileobj.
+    # sqlite3.backup() is lock-aware (acquires read-lock), includes
+    # uncommitted WAL frames, and is atomic — it won't produce a torn
+    # file if a checkpoint runs partway through. The old copyfileobj
+    # approach only copied the .db file, missed .db-wal frames, and
+    # could produce corrupted backups under concurrent write load.
+    src = sqlite3.connect(str(db_path))
+    dst = sqlite3.connect(":memory:")
+    src.backup(dst)
+    src.close()
+
+    # Serialize the in-memory backup → gzip → disk
+    buf = io.BytesIO()
+    for line in dst.iterdump():
+        buf.write((line + "\n").encode("utf-8"))
+    dst.close()
+
+    with gzip.open(backup_path, "wb") as f_out:
+        f_out.write(buf.getvalue())
     
     # Calculate checksums
     db_checksum = hashlib.sha256(db_path.read_bytes()).hexdigest()[:16]
@@ -94,12 +111,19 @@ def restore_backup(backup_path: Path, db_path: Path = None) -> Dict:
         emergency_path = db_path.with_suffix('.emergency_backup.db')
         shutil.copy2(db_path, emergency_path)
     
-    # Decompress and restore
+    # Decompress and restore using sqlite3 backup API
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with gzip.open(backup_path, 'rb') as f_in:
-        with open(db_path, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+
+    with gzip.open(backup_path, "rb") as f_in:
+        sql_dump = f_in.read().decode("utf-8")
+
+    # Rebuild DB in-memory, then backup to target file
+    mem_db = sqlite3.connect(":memory:")
+    mem_db.executescript(sql_dump)
+    target_db = sqlite3.connect(str(db_path))
+    mem_db.backup(target_db)
+    mem_db.close()
+    target_db.close()
     
     # Verify restored database
     is_valid = verify_integrity(db_path)

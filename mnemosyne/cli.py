@@ -143,9 +143,6 @@ def cmd_stats(args):
 def cmd_sleep(args):
     """Run consolidation cycle."""
     mem = _get_memory()
-    # Use sleep_all_sessions to consolidate across ALL sessions, not just "default"
-    # The per-session sleep() uses the Mnemosyne instance's session_id which is
-    # always "default" when created from CLI - causing the phantom session bug.
     result = mem.sleep_all_sessions()
     print(f"Consolidation complete: {result}")
 
@@ -154,8 +151,6 @@ def cmd_diagnose(args):
     """Run PII-safe diagnostics. Use --fix to auto-install missing dependencies."""
     fix_mode = "--fix" in args
     dry_run = "--dry-run" in args
-
-    # Filter out flag args
     clean_args = [a for a in args if not a.startswith("--")]
 
     try:
@@ -192,7 +187,7 @@ def cmd_export(args):
     mem = _get_memory()
     result = mem.export_to_file(output_path)
     print(
-        "Exported "
+        f"Exported "
         f"{result.get('working_memory_count', 0)} working, "
         f"{result.get('episodic_memory_count', 0)} episodic, "
         f"{result.get('legacy_memories_count', 0)} legacy, "
@@ -217,7 +212,7 @@ def cmd_import(args):
         _fail(str(e))
     beam_stats = result.get("beam", {})
     print(
-        "Imported "
+        f"Imported "
         f"{beam_stats.get('working_memory', {}).get('inserted', 0)} working, "
         f"{beam_stats.get('episodic_memory', {}).get('inserted', 0)} episodic, "
         f"{result.get('legacy', {}).get('inserted', 0)} legacy, "
@@ -252,6 +247,83 @@ def cmd_mcp(args):
     except ImportError:
         print("MCP not available. Install with: pip install mnemosyne-memory[mcp]")
         sys.exit(1)
+
+
+def cmd_backup(args):
+    """Create a compressed backup of the database."""
+    from mnemosyne.dr.recovery import create_backup
+    output_dir = Path(args[0]) if args else None
+    try:
+        result = create_backup(backup_dir=output_dir)
+        print(f"Backup created: {result['backup_path']}")
+        print(f"  Original size: {result['original_size']:,} bytes")
+        print(f"  Backup size:   {result['backup_size']:,} bytes")
+        print(f"  Checksum:      {result['db_checksum']}")
+    except Exception as e:
+        _fail(str(e))
+
+
+def cmd_restore(args):
+    """Restore database from a backup file."""
+    if not args:
+        _usage("Usage: mnemosyne restore <backup_file.db.gz>")
+    from mnemosyne.dr.recovery import restore_backup
+    try:
+        result = restore_backup(Path(args[0]))
+        status = "valid" if result["integrity_check"] else "corrupt"
+        print(f"Restored from: {result['backup_used']}")
+        print(f"  Database:     {result['database_path']}")
+        print(f"  Integrity:    {status}")
+        if not result["integrity_check"]:
+            _fail("Restored database failed integrity check. Emergency backup preserved.")
+    except FileNotFoundError as e:
+        _fail(str(e))
+
+
+def cmd_verify(args):
+    """Verify database integrity."""
+    from mnemosyne.dr.recovery import verify_integrity
+    db_path = Path(args[0]) if args else None
+    quick = "--quick" in args
+    try:
+        if quick:
+            import sqlite3
+            db = db_path or Path(DATA_DIR) / "mnemosyne.db"
+            conn = sqlite3.connect(str(db))
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA quick_check")
+            result = cursor.fetchone()
+            conn.close()
+            ok = result[0] == "ok"
+        else:
+            ok = verify_integrity(db_path)
+        if ok:
+            print("Database integrity check passed")
+        else:
+            print("Database is corrupt. Run 'mnemosyne restore' from a backup.")
+            raise SystemExit(1)
+    except Exception as e:
+        _fail(str(e))
+
+
+def cmd_backups_list(args):
+    """List available backups."""
+    from mnemosyne.dr.recovery import list_backups
+    backup_dir = Path(args[0]) if args else None
+    backups = list_backups(backup_dir=backup_dir)
+    if not backups:
+        print("No backups found.")
+        print(f"  Backups directory: {backup_dir or Path.home() / '.mnemosyne' / 'backups'}")
+        return
+    print(f"\nBackups ({len(backups)} total):\n")
+    for b in backups:
+        meta = b.get("metadata", {})
+        print(f"  {b['name']}")
+        print(f"    Size:       {b['size']:,} bytes")
+        print(f"    Created:    {meta.get('timestamp', b['modified'])}")
+        if meta.get("db_checksum"):
+            print(f"    Checksum:   {meta['db_checksum']}")
+        print()
 
 
 def cmd_bank(args):
@@ -306,6 +378,10 @@ COMMANDS = {
     "import-hindsight": cmd_import_hindsight,
     "mcp": cmd_mcp,
     "bank": cmd_bank,
+    "backup": cmd_backup,
+    "restore": cmd_restore,
+    "verify": cmd_verify,
+    "backups": cmd_backups_list,
 }
 
 
@@ -321,11 +397,15 @@ def run_cli():
         print("  delete <id>                            Delete a memory")
         print("  stats                                  Show statistics")
         print("  sleep                                  Run consolidation")
-        print("  diagnose [--fix] [--dry-run]          Run diagnostics (--fix auto-installs deps)")
+        print("  diagnose [--fix] [--dry-run]           Run diagnostics (--fix auto-installs deps)")
         print("  export [file.json]                     Export memories")
         print("  import <file.json>                     Import memories")
-        print("  import-hindsight <file|url> [bank]      Import Hindsight memories")
+        print("  import-hindsight <file|url> [bank]     Import Hindsight memories")
         print("  bank list|create|delete [name]         Manage memory banks")
+        print("  backup [output_dir]                    Create database backup")
+        print("  restore <backup.db.gz>                 Restore from backup")
+        print("  verify [db_path] [--quick]             Verify database integrity")
+        print("  backups [backup_dir]                   List available backups")
         print("  mcp [--transport sse] [--port 8080]    Start MCP server")
         return
 
