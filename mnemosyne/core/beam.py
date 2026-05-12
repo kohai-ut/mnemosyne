@@ -62,6 +62,7 @@ try:
         VeracityConsolidator,
         VERACITY_WEIGHTS,
         clamp_veracity,
+        aggregate_veracity,
     )
 except ImportError:
     VeracityConsolidator = None
@@ -77,6 +78,11 @@ except ImportError:
         "silently (no per-call WARNING). Operators should resolve the "
         "import to restore full audit logging."
     )
+
+    def aggregate_veracity(source_veracities) -> str:
+        """Fallback aggregator when veracity_consolidation is unavailable.
+        Returns 'unknown' unconditionally so consolidation doesn't crash."""
+        return "unknown"
 
     def clamp_veracity(raw, *, context: str = "veracity") -> str:
         """Fallback when veracity_consolidation is unavailable.
@@ -1811,9 +1817,19 @@ class BeamMemory:
     def consolidate_to_episodic(self, summary: str, source_wm_ids: List[str],
                                 source: str = "consolidation", importance: float = 0.6,
                                 metadata: Dict = None, valid_until: str = None,
-                                scope: str = "session") -> str:
+                                scope: str = "session",
+                                veracity: Optional[str] = None) -> str:
         """
         Store a consolidated summary into episodic_memory with optional embedding.
+
+        E4.a.1: `veracity` kwarg threads the aggregated source-row veracity
+        into the episodic INSERT. Pre-fix the INSERT didn't include the
+        veracity column at all, so post-sleep rows took the schema default
+        'unknown' — destroying the per-row veracity signal `remember_batch`
+        had populated. Callers (typically `sleep()`) should compute the
+        aggregate via `aggregate_veracity()` over the source rows' veracity
+        values and pass it here. `None` falls back to 'unknown' (matches
+        legacy behavior + schema default).
         """
         memory_id = _generate_id(summary)
         timestamp = datetime.now().isoformat()
@@ -1825,15 +1841,23 @@ class BeamMemory:
                 ep_type = result.memory_type.value
             except Exception:
                 pass
+        # Clamp to canonical allowlist at the trust boundary. Defaults to
+        # 'unknown' if not provided (back-compat with pre-E4.a.1 callers).
+        if veracity is None:
+            row_veracity = "unknown"
+        else:
+            row_veracity = clamp_veracity(
+                veracity, context="consolidate_to_episodic.veracity"
+            )
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO episodic_memory
             (id, content, source, timestamp, session_id, importance, metadata_json, summary_of, valid_until, scope,
-             author_id, author_type, channel_id, memory_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             author_id, author_type, channel_id, memory_type, veracity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory_id, summary, source, timestamp, self.session_id, importance,
               json.dumps(metadata or {}), ",".join(source_wm_ids), valid_until, scope,
-              self.author_id, self.author_type, self.channel_id, ep_type))
+              self.author_id, self.author_type, self.channel_id, ep_type, row_veracity))
         rowid = cursor.lastrowid
 
         if _embeddings.available():
@@ -3601,8 +3625,10 @@ class BeamMemory:
         # and miss the NULL rows. See Codex /review note for C9.
         # consolidated_at IS NULL filters out rows already processed by
         # a prior sleep so we don't re-summarize the same originals.
+        # E4.a.1: select veracity so the summary can inherit aggregated
+        # source-row trust signal (instead of defaulting to 'unknown').
         cursor.execute(f"""
-            SELECT id, content, source, timestamp, importance, metadata_json, scope, valid_until
+            SELECT id, content, source, timestamp, importance, metadata_json, scope, valid_until, veracity
             FROM working_memory
             WHERE COALESCE(session_id, 'default') = ?
               AND timestamp < ?
@@ -3683,6 +3709,15 @@ class BeamMemory:
                     if aggregated_valid_until is None or item["valid_until"] < aggregated_valid_until:
                         aggregated_valid_until = item["valid_until"]
 
+            # E4.a.1: aggregate per-row veracity into the summary's
+            # veracity label. Mode of sources with conservative tie-break.
+            # Pre-fix the episodic INSERT omitted veracity and the row
+            # took 'unknown' (0.8 multiplier) regardless of how confident
+            # the sources were.
+            aggregated_veracity = aggregate_veracity(
+                [item.get("veracity") for item in items]
+            )
+
             # --- Try LLM summarization (chunked to fit context) ---
             summary = None
             llm_succeeded = False
@@ -3734,6 +3769,7 @@ class BeamMemory:
                     importance=0.6,
                     scope=aggregated_scope,
                     valid_until=aggregated_valid_until,
+                    veracity=aggregated_veracity,
                     metadata={
                         "original_count": len(items),
                         "source": source,

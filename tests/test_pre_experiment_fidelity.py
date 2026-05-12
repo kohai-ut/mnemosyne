@@ -1,0 +1,384 @@
+"""Pre-experiment fidelity fixes — regression tests for E4.a.1, E2.a.10, C29.
+
+This file pins three pre-BEAM-recovery-experiment fixes surfaced by the
+end-to-end audit on 2026-05-11:
+
+- **E4.a.1 (experiment-relevant):** `consolidate_to_episodic` destroys source-row
+  veracity at consolidation. Pre-fix the INSERT omitted the veracity column;
+  post-sleep rows took schema default 'unknown' (0.8 multiplier) regardless
+  of how confident the sources were. Post-E4 `remember_batch` populates
+  veracity per-row, so the destruction is asymmetric and contaminates
+  the experiment's ability to measure consolidated-memory recall quality.
+
+- **E2.a.10 (defensive):** `remember_batch` embedding loop silently
+  swallowed partial-failure (IndexError mid-loop on short vectors array,
+  exception during embed). At 250K-row scale a transient failure would
+  invisibly bias the vector voice toward earlier-ingested rows with zero
+  operator signal.
+
+- **C29 (cleanup):** veracity weight constants were duplicated across
+  `veracity_consolidation.py` (Bayesian compounding) and `beam.py`
+  (recall multiplier). Drift risk under env-var overrides.
+
+Why bundle: all three are pre-experiment fidelity work; all three are
+small; all three share the veracity / consolidation / embedding ingest
+surface. One PR + one /review pass minimizes maintainer review overhead.
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List
+from unittest.mock import patch
+
+import pytest
+import numpy as np
+
+from mnemosyne.core.beam import (
+    BeamMemory,
+    STATED_WEIGHT,
+    INFERRED_WEIGHT,
+    TOOL_WEIGHT,
+    IMPORTED_WEIGHT,
+    UNKNOWN_WEIGHT,
+)
+from mnemosyne.core.veracity_consolidation import (
+    VERACITY_WEIGHTS,
+    VERACITY_ALLOWED,
+    aggregate_veracity,
+)
+
+
+@pytest.fixture
+def temp_db():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir) / "test.db"
+
+
+# ─────────────────────────────────────────────────────────────────
+# C29 — VERACITY_WEIGHTS centralization
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestC29WeightCentralization:
+    """beam.py reads default values from veracity_consolidation.VERACITY_WEIGHTS
+    so a single change in one place is reflected everywhere — eliminating
+    silent drift between Bayesian compounding (consolidation) and the
+    veracity multiplier (recall)."""
+
+    def test_default_weights_match_canonical_dict(self):
+        """When no env vars set, all beam.py constants equal the canonical
+        VERACITY_WEIGHTS dict values."""
+        assert STATED_WEIGHT == VERACITY_WEIGHTS["stated"]
+        assert INFERRED_WEIGHT == VERACITY_WEIGHTS["inferred"]
+        assert TOOL_WEIGHT == VERACITY_WEIGHTS["tool"]
+        assert IMPORTED_WEIGHT == VERACITY_WEIGHTS["imported"]
+        assert UNKNOWN_WEIGHT == VERACITY_WEIGHTS["unknown"]
+
+    def test_canonical_dict_labels_match_allowlist(self):
+        """The keys of VERACITY_WEIGHTS must equal VERACITY_ALLOWED —
+        clamp_veracity uses VERACITY_ALLOWED as the gate; if a weight
+        exists for a label outside the allowlist, callers can never
+        reach that branch (dead weight)."""
+        assert set(VERACITY_WEIGHTS.keys()) == VERACITY_ALLOWED
+
+
+# ─────────────────────────────────────────────────────────────────
+# E4.a.1 — aggregate_veracity helper + consolidate_to_episodic wiring
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestAggregateVeracityHelper:
+    """Direct unit tests on `aggregate_veracity` — no DB, bypasses sleep
+    complexity so the aggregation logic is testable in isolation."""
+
+    def test_empty_input_returns_unknown(self):
+        assert aggregate_veracity([]) == "unknown"
+
+    def test_none_input_returns_unknown(self):
+        # Defensive: caller might pass None when source rows had no
+        # veracity column populated.
+        assert aggregate_veracity(None) == "unknown"
+
+    def test_all_invalid_input_returns_unknown(self):
+        """Non-canonical labels don't vote; if all sources are invalid,
+        the aggregate falls back to 'unknown'."""
+        assert aggregate_veracity(["bogus", "made-up", None]) == "unknown"
+
+    def test_single_label_returns_that_label(self):
+        assert aggregate_veracity(["stated"]) == "stated"
+        assert aggregate_veracity(["inferred"]) == "inferred"
+
+    def test_all_same_label_returns_that_label(self):
+        assert aggregate_veracity(["stated"] * 5) == "stated"
+        assert aggregate_veracity(["inferred"] * 10) == "inferred"
+
+    def test_clear_majority_wins(self):
+        assert aggregate_veracity(["stated", "stated", "stated", "inferred"]) == "stated"
+        assert aggregate_veracity(["tool", "tool", "tool", "stated", "inferred"]) == "tool"
+
+    def test_two_way_tie_breaks_to_most_conservative(self):
+        """Tied counts → pick the lowest-weight label (most conservative).
+        stated=1.0, inferred=0.7 → 'inferred' (lower weight) wins the tie."""
+        assert aggregate_veracity(["stated", "inferred"]) == "inferred"
+        assert aggregate_veracity(["stated", "tool"]) == "tool"  # tool=0.5
+        assert aggregate_veracity(["inferred", "unknown"]) == "inferred"  # inferred=0.7 < unknown=0.8
+
+    def test_three_way_tie_breaks_to_lowest_weight(self):
+        # tool=0.5, inferred=0.7, imported=0.6 → tool wins (lowest)
+        assert aggregate_veracity(["tool", "inferred", "imported"]) == "tool"
+
+    def test_invalid_values_dropped_then_aggregate(self):
+        """Non-canonical labels filtered out; canonical labels still vote."""
+        assert aggregate_veracity(["stated", "bogus", "stated", None]) == "stated"
+        # Junk-only with one valid: that one wins
+        assert aggregate_veracity(["junk", "more junk", "inferred"]) == "inferred"
+
+
+class TestE4a1ConsolidateToEpisodicVeracity:
+    """`consolidate_to_episodic` now takes a `veracity` kwarg; the INSERT
+    populates the column. Pre-fix the column wasn't included in the INSERT
+    so post-sleep rows defaulted to 'unknown'."""
+
+    def test_consolidate_with_explicit_veracity_stored(self, temp_db):
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        mid = beam.consolidate_to_episodic(
+            summary="The user said they prefer dark mode",
+            source_wm_ids=["wm-1", "wm-2"],
+            veracity="stated",
+        )
+        row = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row["veracity"] == "stated"
+
+    def test_consolidate_with_no_veracity_defaults_unknown(self, temp_db):
+        """Back-compat: legacy callers that don't pass veracity get
+        the schema default 'unknown', matching pre-fix behavior."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        mid = beam.consolidate_to_episodic(
+            summary="Legacy caller without veracity",
+            source_wm_ids=["wm-1"],
+        )
+        row = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row["veracity"] == "unknown"
+
+    def test_consolidate_clamps_invalid_veracity(self, temp_db):
+        """Trust-boundary clamp at the kwarg: bogus values fall back
+        to 'unknown' with a WARNING log."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        mid = beam.consolidate_to_episodic(
+            summary="Caller passed garbage veracity",
+            source_wm_ids=["wm-1"],
+            veracity="some-random-junk",
+        )
+        row = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row["veracity"] == "unknown"
+
+
+class TestE4a1SleepEndToEndVeracity:
+    """Full sleep() flow with E4-style per-row veracity should preserve
+    the aggregated signal in the episodic summary."""
+
+    def _seed_wm_with_veracity(self, db_path, session_id, ts, items):
+        """Insert N working_memory rows with explicit veracity values.
+        Returns the list of inserted ids."""
+        conn = sqlite3.connect(db_path)
+        ids = []
+        for i, (content, veracity) in enumerate(items):
+            rid = f"wm-{session_id}-{i}"
+            ids.append(rid)
+            conn.execute(
+                "INSERT INTO working_memory (id, content, source, timestamp, "
+                "session_id, importance, veracity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rid, content, "conversation", ts, session_id, 0.5, veracity),
+            )
+        conn.commit()
+        conn.close()
+        return ids
+
+    def test_all_stated_sources_produce_stated_summary(self, temp_db, monkeypatch):
+        """Homogeneous-stated sources → stated summary (1.0 multiplier,
+        not the legacy 0.8 unknown default)."""
+        monkeypatch.setattr("mnemosyne.core.local_llm.llm_available", lambda: False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        self._seed_wm_with_veracity(temp_db, "s1", old_ts, [
+            ("user wants feature A", "stated"),
+            ("user wants feature B", "stated"),
+            ("user wants feature C", "stated"),
+        ])
+
+        beam.sleep(dry_run=False)
+        ep_rows = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory"
+        ).fetchall()
+        assert len(ep_rows) == 1
+        assert ep_rows[0]["veracity"] == "stated", (
+            "Homogeneous stated sources must produce a stated summary; "
+            "pre-fix this would have been 'unknown'."
+        )
+
+    def test_mixed_sources_aggregate_correctly(self, temp_db, monkeypatch):
+        """Majority stated, minority inferred → stated wins by count."""
+        monkeypatch.setattr("mnemosyne.core.local_llm.llm_available", lambda: False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        self._seed_wm_with_veracity(temp_db, "s1", old_ts, [
+            ("explicit user fact 1", "stated"),
+            ("explicit user fact 2", "stated"),
+            ("explicit user fact 3", "stated"),
+            ("derived note", "inferred"),
+        ])
+
+        beam.sleep(dry_run=False)
+        ep_rows = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory"
+        ).fetchall()
+        assert len(ep_rows) == 1
+        assert ep_rows[0]["veracity"] == "stated"
+
+    def test_tied_sources_conservative_resolution(self, temp_db, monkeypatch):
+        """2-stated + 2-inferred → tie → inferred wins (lower weight)."""
+        monkeypatch.setattr("mnemosyne.core.local_llm.llm_available", lambda: False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        self._seed_wm_with_veracity(temp_db, "s1", old_ts, [
+            ("fact 1", "stated"),
+            ("fact 2", "stated"),
+            ("note 1", "inferred"),
+            ("note 2", "inferred"),
+        ])
+
+        beam.sleep(dry_run=False)
+        ep_rows = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory"
+        ).fetchall()
+        assert len(ep_rows) == 1
+        assert ep_rows[0]["veracity"] == "inferred"
+
+    def test_legacy_null_veracity_sources_default_unknown(self, temp_db, monkeypatch):
+        """Pre-E4 source rows had no veracity set (column NULL or 'unknown');
+        the aggregator falls back to 'unknown' for them — back-compat."""
+        monkeypatch.setattr("mnemosyne.core.local_llm.llm_available", lambda: False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        # Insert via raw SQL with NULL veracity to simulate pre-E4 rows.
+        conn = sqlite3.connect(temp_db)
+        conn.execute(
+            "INSERT INTO working_memory (id, content, source, timestamp, "
+            "session_id, importance, veracity) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            ("wm-legacy-1", "legacy row", "conversation", old_ts, "s1", 0.5),
+        )
+        conn.commit()
+        conn.close()
+
+        beam.sleep(dry_run=False)
+        ep_rows = beam.conn.execute(
+            "SELECT veracity FROM episodic_memory"
+        ).fetchall()
+        assert len(ep_rows) == 1
+        # No valid labels in sources → 'unknown' fallback.
+        assert ep_rows[0]["veracity"] == "unknown"
+
+
+# ─────────────────────────────────────────────────────────────────
+# E2.a.10 — embedding loop bounds check + logging
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestE2a10EmbeddingLoopDefense:
+    """`remember_batch` embedding block: length mismatch must skip + log
+    rather than partially-store; exception must log + skip rather than
+    silently swallow."""
+
+    def test_length_mismatch_skips_storage_with_warning(self, temp_db, caplog):
+        """If `_embeddings.embed()` returns fewer vectors than inputs,
+        skip vector storage entirely and log a WARNING — pre-fix the
+        IndexError mid-loop would have silently dropped the whole batch."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        items = [{"content": f"row {i}"} for i in range(5)]
+
+        # Patch _embeddings.embed to return short vectors.
+        with patch("mnemosyne.core.beam._embeddings") as mock_emb:
+            mock_emb.available.return_value = True
+            mock_emb.embed.return_value = np.zeros((3, 384), dtype=np.float32)
+            mock_emb._DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+            mock_emb.serialize.side_effect = lambda v: "[serialized]"
+            with caplog.at_level(logging.WARNING):
+                beam.remember_batch(items)
+
+        # No embeddings should have been stored (skip-on-mismatch).
+        rows = beam.conn.execute(
+            "SELECT COUNT(*) FROM memory_embeddings"
+        ).fetchone()
+        assert rows[0] == 0
+        # WARNING log captured.
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "mismatch" in r.message]
+        assert warnings, (
+            "Expected a WARNING log for the length mismatch; got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_embed_returns_none_logs_warning(self, temp_db, caplog):
+        """If embed() returns None, log + skip cleanly."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        items = [{"content": "row"}]
+
+        with patch("mnemosyne.core.beam._embeddings") as mock_emb:
+            mock_emb.available.return_value = True
+            mock_emb.embed.return_value = None
+            with caplog.at_level(logging.WARNING):
+                beam.remember_batch(items)
+
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "returned None" in r.message]
+        assert warnings
+
+    def test_embed_exception_logs_with_diagnostic(self, temp_db, caplog):
+        """If embed() raises, the WARNING log carries the exception
+        repr so operators can diagnose."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        items = [{"content": "row"}]
+
+        with patch("mnemosyne.core.beam._embeddings") as mock_emb:
+            mock_emb.available.return_value = True
+            mock_emb.embed.side_effect = RuntimeError("disk full sim")
+            with caplog.at_level(logging.WARNING):
+                beam.remember_batch(items)
+
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING
+                    and "embedding storage failed" in r.message]
+        assert warnings, (
+            "Expected a WARNING log on embed() exception; got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        assert any("disk full sim" in r.message for r in warnings), (
+            "Exception repr should appear in the log for operator diagnosis."
+        )
+
+    def test_happy_path_still_stores_embeddings(self, temp_db):
+        """Sanity: normal flow with matched-length vectors still stores."""
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        items = [{"content": f"row {i}"} for i in range(3)]
+
+        with patch("mnemosyne.core.beam._embeddings") as mock_emb:
+            mock_emb.available.return_value = True
+            mock_emb.embed.return_value = np.zeros((3, 384), dtype=np.float32)
+            mock_emb._DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+            mock_emb.serialize.side_effect = lambda v: "[serialized]"
+            beam.remember_batch(items)
+
+        rows = beam.conn.execute(
+            "SELECT COUNT(*) FROM memory_embeddings"
+        ).fetchone()
+        assert rows[0] == 3
