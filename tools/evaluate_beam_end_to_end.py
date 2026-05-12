@@ -1116,9 +1116,16 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     # HYBRID: try context→value matching first for factual questions (IE/MR/KU),
     # then fall through to full-context for complex reasoning (ABS/CR/EO/SUM/TR).
     _full_context = os.environ.get("FULL_CONTEXT_MODE", "").lower() in ("1", "true", "yes")
+    # Precedence: pure-recall overrides full-context. The point of
+    # pure-recall is to force every answer through Mnemosyne recall;
+    # full-context's "ship the whole conversation to the LLM" path
+    # would silently invalidate that guarantee (the LLM would answer
+    # from raw `FULL CONVERSATION:` regardless of arm).
+    if _full_context and _pure_recall:
+        _full_context = False
     # DEBUG
     if os.environ.get("FULL_CONTEXT_MODE"):
-        print(f"    [DEBUG full-context] env={_full_context}, msgs={bool(conversation_messages)}, count={len(conversation_messages) if conversation_messages else 0}")
+        print(f"    [DEBUG full-context] env={_full_context}, msgs={bool(conversation_messages)}, count={len(conversation_messages) if conversation_messages else 0} (pure_recall={_pure_recall})")
     if _full_context and conversation_messages:
         # ---- Phase 1: Try context→value matching for factual questions ----
         # Only use context→value for Information Extraction (IE) and Knowledge Understanding (KU).
@@ -1644,16 +1651,22 @@ def main():
     print(f"  Sample: {sample_size or 'ALL'} conversations/scale")
     print(f"  Model: {args.model}")
     print(f"  Judge: {args.judge_model or args.model}")
-    if args.full_context:
+    # Mode resolution + banner. Pure-recall overrides full-context
+    # because the bypass that full-context provides (raw conversation
+    # straight to LLM) is exactly what pure-recall is meant to forbid.
+    _pure_recall_env = os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes")
+    if args.pure_recall or _pure_recall_env:
+        os.environ["MNEMOSYNE_BENCHMARK_PURE_RECALL"] = "1"
+        if args.full_context or os.environ.get("FULL_CONTEXT_MODE"):
+            # Conflict: warn loudly so the operator isn't surprised.
+            print("  Mode: PURE-RECALL (overrides FULL_CONTEXT/--full-context — "
+                  "every answer goes through Mnemosyne recall)")
+        else:
+            print("  Mode: PURE-RECALL (per-ability bypasses + RECENT CONTEXT disabled — "
+                  "every answer goes through Mnemosyne recall)")
+    elif args.full_context:
         os.environ["FULL_CONTEXT_MODE"] = "1"
         print("  Mode: FULL-CONTEXT (bypassing retrieval)")
-    if args.pure_recall:
-        os.environ["MNEMOSYNE_BENCHMARK_PURE_RECALL"] = "1"
-        print("  Mode: PURE-RECALL (per-ability bypasses + RECENT CONTEXT disabled — "
-              "every answer goes through Mnemosyne recall)")
-    elif os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes"):
-        # Env var set externally — surface it so the run banner shows the mode.
-        print("  Mode: PURE-RECALL (via env var)")
     print(f"{'='*80}")
 
     # Load data

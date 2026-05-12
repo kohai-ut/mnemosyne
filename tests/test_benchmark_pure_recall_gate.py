@@ -154,6 +154,49 @@ class TestPureRecallModeDisablesBypasses:
         # Whatever the LLM returned is the answer (our fake returns LLM-FALLBACK-ANSWER).
         assert ans == "LLM-FALLBACK-ANSWER"
 
+    # TR fixture: must use "Month Day, Year" format which is what
+    # `_extract_timeline_from_conversation`'s Pattern 1 matches. ISO
+    # `2024-01-15` format DOES NOT match the regex — using ISO would
+    # make the test pass vacuously (the bypass wouldn't fire in either
+    # mode, so "absent in pure-recall mode" is trivially true).
+    _TR_FIXTURE_MSGS = [
+        {"role": "user", "content": "I started the project on March 15, 2024 with the team."},
+        {"role": "user", "content": "Then I deployed it on June 30, 2024 after testing."},
+        {"role": "user", "content": "The final release was September 10, 2024."},
+    ]
+    _TR_FIXTURE_QUESTION = "how many days between project start and deployment?"
+
+    # CR fixture: `_detect_contradictions` needs key terms from the
+    # question to appear in the conversation AND at least one message
+    # must contain a negation word (never/not/n't/no/etc.) in the
+    # sentence with the term. Using "never" satisfies that.
+    _CR_FIXTURE_MSGS = [
+        {"role": "user", "content": "I love flask routes and use them for all HTTP requests."},
+        {"role": "user", "content": "I never use flask routes — I prefer raw WSGI handlers."},
+    ]
+    _CR_FIXTURE_QUESTION = "Have I worked with flask routes?"
+
+    def test_default_tr_oracle_fires_positive_control(self, temp_db, fake_llm, monkeypatch):
+        """Positive control: in DEFAULT mode, the TR-bypass DOES fire
+        with this fixture. Without this control, the pure-recall TR
+        test (below) passes vacuously when the extractor returns empty."""
+        monkeypatch.delenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", raising=False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        from tools.evaluate_beam_end_to_end import answer_with_memory
+
+        answer_with_memory(
+            llm=fake_llm, beam=beam,
+            question=self._TR_FIXTURE_QUESTION,
+            conversation_messages=self._TR_FIXTURE_MSGS,
+            top_k=5, ability="TR",
+        )
+        sent_messages = fake_llm.chat.call_args[0][0]
+        system_msg = next(m for m in sent_messages if m["role"] == "system")
+        assert "date calculator" in system_msg["content"].lower(), (
+            f"TR-bypass did NOT fire in DEFAULT mode — fixture is too weak "
+            f"to discriminate. Got system prompt: {system_msg['content'][:200]}"
+        )
+
     def test_pure_recall_tr_does_not_short_circuit_via_oracle(
         self, temp_db, fake_llm, monkeypatch
     ):
@@ -164,29 +207,36 @@ class TestPureRecallModeDisablesBypasses:
         beam = BeamMemory(session_id="s1", db_path=temp_db)
         from tools.evaluate_beam_end_to_end import answer_with_memory
 
-        # TR-shaped question with multiple date references that would
-        # otherwise trigger the oracle.
-        msgs = [
-            {"role": "user", "content": "I started the project on 2024-01-15"},
-            {"role": "user", "content": "Then I deployed on 2024-03-22"},
-            {"role": "user", "content": "Final release was 2024-06-30"},
-        ]
         answer_with_memory(
-            llm=fake_llm,
-            beam=beam,
-            question="how many days between project start and deployment?",
-            conversation_messages=msgs,
-            top_k=5,
-            ability="TR",
+            llm=fake_llm, beam=beam,
+            question=self._TR_FIXTURE_QUESTION,
+            conversation_messages=self._TR_FIXTURE_MSGS,
+            top_k=5, ability="TR",
         )
-        # The TR-bypass returns the LLM answer with a date-calculator
-        # system prompt; the pure-recall path uses ANSWER_SYSTEM_PROMPT.
-        # Inspect the system prompt sent to the LLM to distinguish.
         sent_messages = fake_llm.chat.call_args[0][0]
         system_msg = next(m for m in sent_messages if m["role"] == "system")
         assert "date calculator" not in system_msg["content"].lower(), (
             f"TR-bypass fired despite pure-recall mode; got system prompt: "
             f"{system_msg['content'][:200]}"
+        )
+
+    def test_default_cr_detection_fires_positive_control(self, temp_db, fake_llm, monkeypatch):
+        """Positive control: in DEFAULT mode, the CR-detect injection
+        DOES fire with this fixture. Pinpoints fixture strength."""
+        monkeypatch.delenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", raising=False)
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        from tools.evaluate_beam_end_to_end import answer_with_memory
+
+        answer_with_memory(
+            llm=fake_llm, beam=beam,
+            question=self._CR_FIXTURE_QUESTION,
+            conversation_messages=self._CR_FIXTURE_MSGS,
+            top_k=5, ability="CR",
+        )
+        user_msg = fake_llm.chat.call_args[0][0][-1]["content"]
+        assert "contradictory information" in user_msg, (
+            f"CR-detect did NOT inject in DEFAULT mode — fixture is too "
+            f"weak to discriminate. Got prompt: {user_msg[:400]}"
         )
 
     def test_pure_recall_cr_does_not_inject_contradiction_context(
@@ -198,22 +248,13 @@ class TestPureRecallModeDisablesBypasses:
         beam = BeamMemory(session_id="s1", db_path=temp_db)
         from tools.evaluate_beam_end_to_end import answer_with_memory
 
-        # Contradictory statements that would trigger _detect_contradictions.
-        msgs = [
-            {"role": "user", "content": "I love coffee, it's my favorite drink"},
-            {"role": "user", "content": "Actually, I prefer tea over coffee"},
-        ]
         answer_with_memory(
-            llm=fake_llm,
-            beam=beam,
-            question="what is my preferred drink?",
-            conversation_messages=msgs,
-            top_k=5,
-            ability="CR",
+            llm=fake_llm, beam=beam,
+            question=self._CR_FIXTURE_QUESTION,
+            conversation_messages=self._CR_FIXTURE_MSGS,
+            top_k=5, ability="CR",
         )
         user_msg = fake_llm.chat.call_args[0][0][-1]["content"]
-        # The CR-inject prefix is "I notice you've mentioned contradictory…"
-        # — assert it's NOT in the prompt.
         assert "contradictory information" not in user_msg, (
             f"CR-bypass injected contradiction context despite pure-recall mode; "
             f"prompt: {user_msg[:300]}"
@@ -281,3 +322,113 @@ class TestPureRecallEnvValueParsing:
         # IE bypass SHOULD fire — LLM not called, value returned directly.
         assert ans == "blue"
         fake_llm.chat.assert_not_called()
+
+
+class TestPureRecallPrecedenceOverFullContext:
+    """Codex /review P1: when both pure_recall and full_context are
+    active, pure_recall MUST win — otherwise the full-context path
+    silently invalidates the recall-only guarantee by shipping the
+    entire raw conversation to the LLM."""
+
+    def test_pure_recall_disables_full_context_mode_even_when_both_set(
+        self, temp_db, fake_llm, monkeypatch
+    ):
+        """Both env vars set → pure_recall wins; FULL CONVERSATION
+        block must NOT appear in the prompt."""
+        monkeypatch.setenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", "1")
+        monkeypatch.setenv("FULL_CONTEXT_MODE", "1")
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        from tools.evaluate_beam_end_to_end import answer_with_memory
+
+        msgs = _build_msgs(20)
+        answer_with_memory(
+            llm=fake_llm,
+            beam=beam,
+            question="some abstract reasoning question",
+            conversation_messages=msgs,
+            top_k=5,
+            ability="ABS",
+        )
+        user_msg = fake_llm.chat.call_args[0][0][-1]["content"]
+        assert "FULL CONVERSATION" not in user_msg, (
+            "FULL_CONTEXT_MODE leaked despite pure-recall being set; "
+            f"prompt: {user_msg[:400]}"
+        )
+
+    def test_full_context_alone_still_works_when_pure_recall_off(
+        self, temp_db, fake_llm, monkeypatch
+    ):
+        """Sanity: existing FULL_CONTEXT behavior unchanged when only
+        full-context is set."""
+        monkeypatch.delenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", raising=False)
+        monkeypatch.setenv("FULL_CONTEXT_MODE", "1")
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        from tools.evaluate_beam_end_to_end import answer_with_memory
+
+        msgs = _build_msgs(5)
+        answer_with_memory(
+            llm=fake_llm,
+            beam=beam,
+            question="some abstract reasoning question",
+            conversation_messages=msgs,
+            top_k=5,
+            ability="ABS",
+        )
+        user_msg = fake_llm.chat.call_args[0][0][-1]["content"]
+        assert "FULL CONVERSATION" in user_msg, (
+            "FULL_CONTEXT_MODE didn't fire when pure-recall was off; "
+            "preserving the existing benchmark mode is a regression "
+            f"if this fails. Prompt: {user_msg[:300]}"
+        )
+
+
+class TestPureRecallActuallyRoutesThroughRecall:
+    """Codex /review P2: prior tests only assert "X not present in
+    prompt" — that passes under both pure-recall AND full-context
+    paths. Strengthen by spying on `_multi_strategy_recall` to confirm
+    pure-recall actually goes through the recall pipeline."""
+
+    def test_pure_recall_invokes_multi_strategy_recall(
+        self, temp_db, fake_llm, monkeypatch
+    ):
+        monkeypatch.setenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", "1")
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        import tools.evaluate_beam_end_to_end as harness
+
+        spy = MagicMock(return_value=[])
+        monkeypatch.setattr(harness, "_multi_strategy_recall", spy)
+        harness.answer_with_memory(
+            llm=fake_llm,
+            beam=beam,
+            question="some reasoning question",
+            conversation_messages=_build_msgs(20),
+            top_k=5,
+            ability="ABS",
+        )
+        spy.assert_called_once()
+
+    def test_pure_recall_tr_routes_through_recall_not_oracle(
+        self, temp_db, fake_llm, monkeypatch
+    ):
+        """Even with a TR-shaped question that would have triggered
+        the timeline oracle, pure-recall mode reaches the recall
+        pipeline."""
+        monkeypatch.setenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", "1")
+        beam = BeamMemory(session_id="s1", db_path=temp_db)
+        import tools.evaluate_beam_end_to_end as harness
+
+        spy = MagicMock(return_value=[])
+        monkeypatch.setattr(harness, "_multi_strategy_recall", spy)
+        msgs = [
+            {"role": "user", "content": "started project 2024-01-15"},
+            {"role": "user", "content": "deployed 2024-03-22"},
+        ]
+        harness.answer_with_memory(
+            llm=fake_llm,
+            beam=beam,
+            question="days between?",
+            conversation_messages=msgs,
+            top_k=5,
+            ability="TR",
+        )
+        spy.assert_called_once()
