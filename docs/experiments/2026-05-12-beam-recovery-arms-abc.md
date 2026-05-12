@@ -252,6 +252,8 @@ Tell me which order you want them in.
 
 ## What to record per run
 
+For full output-file schemas + analysis recipes (paired bootstrap CIs, ability deltas, fallback-rate sanity checks), see [`../benchmark-results-analysis.md`](../benchmark-results-analysis.md). Quick reference:
+
 Capture into `results/beam_e2e_results.json`:
 
 - **Per-ability score** — TR / CR / IE / KU / MR / ABS / EO / SUM, plus total.

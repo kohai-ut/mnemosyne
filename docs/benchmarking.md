@@ -234,6 +234,8 @@ A small Python helper or shell wrapper that asserts all of these and refuses to 
 
 ## Recording per run
 
+For the **output-file schemas, analysis recipes (paired bootstrap CIs, per-voice attribution, fallback-rate sanity checks), and an AI-assistant-friendly summary**, see [benchmark-results-analysis.md](benchmark-results-analysis.md). Quick reference:
+
 Capture into `results/beam_e2e_results.json` (or equivalent):
 
 - **Per-ability score** — TR / CR / IE / KU / MR / ABS / EO / SUM, plus total.
