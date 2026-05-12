@@ -15,6 +15,7 @@ Hybrid ranking: 50% vector + 30% FTS rank + 20% importance.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import json
@@ -201,11 +202,21 @@ if VEC_TYPE not in ("float32", "int8", "bit"):
 
 
 def _get_connection(db_path: Path = None) -> sqlite3.Connection:
-    """Get thread-local database connection with extensions loaded."""
+    """Get thread-local database connection with extensions loaded.
+
+    Returns a `_BeamConnection` (sqlite3.Connection subclass) so
+    `remember_batch`'s enrichment loop can defer commits via
+    `_deferred_commits`. Connection is otherwise identical to a
+    plain sqlite3.Connection.
+    """
     path = db_path or _default_db_path()
     if not hasattr(_thread_local, 'conn') or _thread_local.conn is None or getattr(_thread_local, 'db_path', None) != str(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path), check_same_thread=False)
+        conn = sqlite3.connect(
+            str(path),
+            check_same_thread=False,
+            factory=_BeamConnection,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -568,6 +579,99 @@ def init_beam(db_path: Path = None):
         """)
     except (sqlite3.OperationalError, RuntimeError):
         pass  # sqlite-vec not available
+
+
+class _BeamConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass that supports deferring commits.
+
+    Used by BeamMemory so `remember_batch`'s enrichment loop can wrap
+    many sub-helper commits in a single transaction. The substores
+    (AnnotationStore, EpisodicGraph, VeracityConsolidator) each call
+    `self.conn.commit()` after their per-row writes; pre-E2-hardening
+    that produced 10-15 commits per batch row × 250K rows = millions
+    of fsync round-trips. /review army (4-source CRITICAL on commit 1)
+    estimated 3-10 hours wall clock for the BEAM-recovery benchmark.
+
+    When `_defer_commit` is True, `commit()` becomes a no-op. The
+    `_deferred_commits` context manager flips the flag, runs the
+    block, then calls `_real_commit()` once at the end (or rolls back
+    on exception).
+
+    Subclassing is required because `sqlite3.Connection.commit` is a
+    read-only C-level method — monkey-patching it raises
+    `AttributeError`. The factory= parameter on `sqlite3.connect` is
+    the supported integration point.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._defer_commit = False
+
+    def commit(self) -> None:
+        if self._defer_commit:
+            return
+        super().commit()
+
+    def _real_commit(self) -> None:
+        """Force a real commit regardless of the defer flag.
+        Used by `_deferred_commits` on successful exit."""
+        super().commit()
+
+
+@contextlib.contextmanager
+def _deferred_commits(conn: sqlite3.Connection):
+    """Suppress nested commit() calls so the caller can wrap many
+    sub-helpers in a single transaction.
+
+    Pairs with `_BeamConnection`'s `_defer_commit` flag. If the
+    passed connection isn't a `_BeamConnection` (e.g., a test
+    constructed `BeamMemory` with a raw sqlite3 connection, or a
+    legacy caller built its own conn), the context manager degrades
+    to a no-op — inner commits still fire, performance regression
+    isn't fixed for that code path but correctness is preserved.
+
+    Threading: `_BeamConnection._defer_commit` is per-connection.
+    BeamMemory uses thread-local connections (see _get_connection),
+    so the flag is visible only to the calling thread. A future
+    refactor that shares the connection across threads would need
+    a lock here.
+    """
+    is_beam_conn = isinstance(conn, _BeamConnection)
+    if not is_beam_conn:
+        # Degrade gracefully: inner commits fire as before. This
+        # keeps the path callable from tests that build conns
+        # manually but loses the batching perf win on that code path.
+        yield
+        return
+
+    conn._defer_commit = True
+    try:
+        yield
+    except Exception:
+        conn._defer_commit = False
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    else:
+        conn._defer_commit = False
+        try:
+            conn._real_commit()
+        except sqlite3.Error as exc:
+            logger.error(
+                "_deferred_commits: final commit failed: %s; "
+                "rolling back the buffered transaction",
+                exc,
+            )
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+    finally:
+        # Defense in depth: clear the flag on any control-flow path.
+        conn._defer_commit = False
 
 
 def _generate_id(content: str) -> str:
@@ -1458,7 +1562,9 @@ class BeamMemory:
     def remember_batch(self, items: List[Dict],
                        *,
                        veracity: Optional[str] = None,
-                       force_veracity: bool = False) -> List[str]:
+                       force_veracity: bool = False,
+                       extract_entities: bool = False,
+                       extract: bool = False) -> List[str]:
         """
         Batch insert into working_memory for high-throughput ingestion.
         Each item dict should have keys: content, source, importance,
@@ -1499,9 +1605,51 @@ class BeamMemory:
         scorer at beam.py::recall now applies the multiplier to
         working_memory hits too, so per-row veracity differentiates
         scores at the experiment level.
+
+        E2 — Enrichment parity with `remember()`:
+            Post-E2 this method runs the same post-insert enrichment
+            pipeline `remember()` runs unconditionally:
+              - `_add_temporal_triple` writes the row's date as an
+                `occurred_on` annotation + the source kind as a
+                `has_source` annotation (zero-LLM, just date string
+                slicing).
+              - `_ingest_graph_and_veracity` runs pattern-based gist +
+                fact extraction via `EpisodicGraph` and consolidates
+                the extracted facts into `consolidated_facts` weighted
+                by per-row veracity (`VeracityConsolidator`). Zero LLM
+                — rule-based / regex pattern matching only.
+
+            Without this fix any high-throughput ingest path bypassed
+            the enrichment layer entirely, leaving the polyphonic
+            engine's `graph` and `fact` voices with no data to fuse —
+            E5's RRF over 4 voices collapsed to 2 voices in practice.
+
+        extract_entities (default False): opt-in regex entity scan
+            via `_extract_and_store_entities`. Cheap but generates
+            additional annotation rows; off by default to keep batch
+            ingest stable for non-experiment callers.
+
+        extract (default False): opt-in LLM-based structured fact
+            extraction via `_extract_and_store_facts`. Real cloud-API
+            cost per row; off by default. The BEAM-recovery experiment
+            arm that tests LLM enrichment sets this True.
+
+        New behavior change for existing batch callers: the always-on
+        pattern-based enrichment now adds ~ms-per-row CPU cost (regex
+        + a few SQLite inserts). For typical importers (10k-100k
+        rows) this is a few seconds of additional latency; for the
+        BEAM benchmark's 250k-message ingest, ~minutes. Documented in
+        CHANGELOG.
         """
         cursor = self.conn.cursor()
         ids = []
+        # Carry per-row source + veracity through to enrichment so we
+        # don't re-derive them post-insert. Keyed by memory_id rather
+        # than indexed-by-position (post-/review M4 — dict eliminates
+        # the parallel-list class of refactor bug, and works under
+        # python -O where the prior `assert mid_check == memory_id`
+        # would have stripped).
+        meta_by_id: Dict[str, Tuple[str, str]] = {}  # mid → (source, veracity)
         timestamp = datetime.now().isoformat()
         # Clamp the method-level default once, not per row — operators
         # who pass a bad default should see one warning, not N.
@@ -1540,6 +1688,8 @@ class BeamMemory:
                 )
             else:
                 item_veracity = default_veracity
+            item_source = item.get("source", "conversation")
+            meta_by_id[memory_id] = (item_source, item_veracity)
             cursor.execute("""
                 INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, metadata_json,
                 author_id, author_type, channel_id, memory_type, veracity)
@@ -1547,7 +1697,7 @@ class BeamMemory:
             """, (
                 memory_id,
                 item["content"],
-                item.get("source", "conversation"),
+                item_source,
                 timestamp,
                 self.session_id,
                 item.get("importance", 0.5),
@@ -2336,7 +2486,14 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: episodic rows never key into wm_vec_sims
+                        # (that dict holds working_memory ids only). Set
+                        # 0.0 explicitly rather than lookup-that-always-
+                        # returns-default, so post-run analysis isn't
+                        # misled into thinking dense similarity was
+                        # computed. The entity/fact-matched episodic
+                        # paths don't compute ep dense sim themselves.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -2449,7 +2606,14 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: episodic rows never key into wm_vec_sims
+                        # (that dict holds working_memory ids only). Set
+                        # 0.0 explicitly rather than lookup-that-always-
+                        # returns-default, so post-run analysis isn't
+                        # misled into thinking dense similarity was
+                        # computed. The entity/fact-matched episodic
+                        # paths don't compute ep dense sim themselves.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -2758,7 +2922,16 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": round(relevance, 4),
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: dense_score is 0.0 by design for EM
+                        # fallback rows — they reach this loop precisely
+                        # because the vec/FTS-driven episodic path
+                        # produced no candidates (no `sim` is computed
+                        # here). Pre-fix this line looked up
+                        # `wm_vec_sims[row["id"]]` which always returned
+                        # 0.0 since `row["id"]` is an episodic id, not
+                        # a working-memory id — same numeric value,
+                        # misleading provenance. Now explicit.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -2779,14 +2952,19 @@ class BeamMemory:
                         "tool": TOOL_WEIGHT, "imported": IMPORTED_WEIGHT,
                         "unknown": UNKNOWN_WEIGHT}
         em_ids_for_tier = [r["id"] for r in results if r.get("tier") == "episodic"]
+        # E3.a.3: pull summary_of in the same round trip so the dedup
+        # helper can use a precomputed map instead of issuing a second
+        # SELECT for the same ep ids.
+        ep_summary_of_map: Dict[str, str] = {}
         if em_ids_for_tier:
             placeholders = ",".join("?" * len(em_ids_for_tier))
             tier_rows = cursor.execute(
-                f"SELECT id, tier, veracity FROM episodic_memory WHERE id IN ({placeholders})",
+                f"SELECT id, tier, veracity, summary_of FROM episodic_memory WHERE id IN ({placeholders})",
                 em_ids_for_tier
             ).fetchall()
             tier_lookup = {r["id"]: (r["tier"] or 1) for r in tier_rows}
             veracity_lookup = {r["id"]: (r["veracity"] or "unknown") for r in tier_rows}
+            ep_summary_of_map = {r["id"]: (r["summary_of"] or "") for r in tier_rows}
             for r in results:
                 if r.get("tier") == "episodic":
                     ep_tier = tier_lookup.get(r["id"], 1)
@@ -2809,6 +2987,15 @@ class BeamMemory:
                 r["score"] *= veracity_map.get(wm_veracity, UNKNOWN_WEIGHT)
 
         results.sort(key=lambda x: x["score"], reverse=True)
+        # E3.a.3: collapse (episodic_summary, working_memory_source)
+        # duplicates before top-K truncation and recall_count attribution.
+        # Post-E3 additive sleep leaves originals alongside summaries, so
+        # a query matching both compounds recall_count twice per fact.
+        # Pass the precomputed summary_of map from the tier-lookup
+        # SELECT above so the helper doesn't issue a redundant query.
+        results = self._dedup_cross_tier_summary_links(
+            results, ep_summary_of_map=ep_summary_of_map
+        )
         final_results = results[:top_k]
 
         # --- Recall tracking: increment counts + set last_recalled ---
@@ -2876,6 +3063,137 @@ class BeamMemory:
         _recall_diag.record_call(truly_empty=_truly_empty)
 
         return final_results
+
+    def _dedup_cross_tier_summary_links(
+        self,
+        results: List[Dict],
+        *,
+        ep_summary_of_map: Optional[Dict[str, str]] = None,
+    ) -> List[Dict]:
+        """E3.a.3: drop the lower-scored side of any (episodic_summary,
+        working_memory_sources) cluster where both surface in the same recall.
+
+        Pre-E3, `sleep()` DELETEd source `working_memory` rows when creating
+        a summary, so dual-surface duplication couldn't happen. Post-E3
+        (additive sleep), sources survive alongside summaries by design.
+        A recall whose query matches both raw and summary text ranks them
+        side-by-side AND compounds `recall_count` twice for the same
+        logical fact — the row's history boost double-counts on every call.
+
+        Dedup rule (per-cluster, not per-edge):
+          - For each episodic row with non-empty `summary_of`, collect the
+            wm_ids it covers that are also present in `results`.
+          - If the ep's score is >= the score of EVERY covered wm in
+            results, drop those wms and keep the ep (summary wins the
+            whole cluster).
+          - Otherwise — some covered wm beats the ep — drop the ep and
+            keep all covered wms (sources win; the dropped ep no longer
+            represents those wms in the result set).
+
+        Per-cluster decisions avoid the per-edge bug where a wm could
+        lose to a summary that itself was being dropped by a different
+        wm. Example fixed by this shape: ep covers wm-1 (0.9) + wm-2 (0.3)
+        with ep at 0.6. Per-edge would drop ep (lost to wm-1) AND wm-2
+        (lost to ep) — but wm-2's representative ep is itself gone, so
+        wm-2 was being dropped against a phantom. Per-cluster correctly
+        keeps both wms.
+
+        Ties (ep_score == wm_score) keep the episodic side (later-stage
+        representation; matches polyphonic engine's diversity-rerank
+        posture). The comparison runs on the post-multiplier `score`
+        field, so the dedup decision reflects the rank the user would
+        have seen.
+
+        Preserves input order on retained rows. Returns the input list
+        unchanged (same object) if no episodic rows are present or no
+        summary_of linkage exists.
+
+        Args:
+            results: scored row dicts; each carries `id`, `tier`, `score`.
+            ep_summary_of_map: optional precomputed `{ep_id: summary_of_str}`
+                from a caller that already SELECT-ed `episodic_memory`
+                rows. When provided, skips the helper's own SELECT — keeps
+                a single source of truth and avoids one round-trip per
+                recall on paths that have already fetched the data.
+
+        Caller pattern: linear path passes the tier-lookup SELECT's
+        precomputed `summary_of` rows; polyphonic path lets the helper
+        do its own SELECT since it has no prior per-ep query.
+
+        Caveats:
+          - Does NOT dedup ep ↔ ep (two summaries covering overlapping
+            wm sets). `sleep()` doesn't re-summarize already-consolidated
+            rows by design (it skips `consolidated_at IS NOT NULL` per
+            E3), so this is rare in practice. If it happens via external
+            re-consolidation tooling, both summaries survive.
+          - The summary_of SELECT and the subsequent recall_count UPDATE
+            are NOT wrapped in a single transaction. A concurrent
+            `sleep()` / `forget()` between them could yield stale linkage
+            data. Acceptable under SQLite WAL + busy_timeout: the worst
+            case is a one-call dedup miss, not data loss.
+        """
+        ep_ids = [r["id"] for r in results if r.get("tier") == "episodic"]
+        if not ep_ids:
+            return results
+
+        # Build summary_map from either precomputed map or own SELECT.
+        summary_map: Dict[str, set] = {}
+        if ep_summary_of_map is not None:
+            for ep_id in ep_ids:
+                raw = ep_summary_of_map.get(ep_id) or ""
+                wm_ids = {s.strip() for s in raw.split(",") if s.strip()}
+                if wm_ids:
+                    summary_map[ep_id] = wm_ids
+        else:
+            placeholders = ",".join("?" * len(ep_ids))
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"SELECT id, summary_of FROM episodic_memory WHERE id IN ({placeholders})",
+                tuple(ep_ids),
+            )
+            for row in cursor.fetchall():
+                raw = row["summary_of"] or ""
+                wm_ids = {s.strip() for s in raw.split(",") if s.strip()}
+                if wm_ids:
+                    summary_map[row["id"]] = wm_ids
+
+        if not summary_map:
+            return results
+
+        # Per-tier score lookups disambiguate cross-tier id collisions
+        # (theoretically possible since `id TEXT PRIMARY KEY` is per-table).
+        wm_scores = {r["id"]: r.get("score", 0.0) for r in results
+                     if r.get("tier") == "working"}
+        ep_scores = {r["id"]: r.get("score", 0.0) for r in results
+                     if r.get("tier") == "episodic"}
+        drop_wm_ids: set = set()
+        drop_ep_ids: set = set()
+
+        for ep_id, covered_wm_ids in summary_map.items():
+            if ep_id not in ep_scores:
+                continue
+            ep_score = ep_scores[ep_id]
+            # Filter to wms actually present in results.
+            present_wms = [w for w in covered_wm_ids if w in wm_scores]
+            if not present_wms:
+                continue
+            # Per-cluster: ep wins only if it beats or ties EVERY present wm.
+            ep_wins_cluster = all(ep_score >= wm_scores[w] for w in present_wms)
+            if ep_wins_cluster:
+                drop_wm_ids.update(present_wms)
+            else:
+                drop_ep_ids.add(ep_id)
+
+        if not (drop_wm_ids or drop_ep_ids):
+            return results
+
+        return [
+            r for r in results
+            if not (
+                (r.get("tier") == "working" and r["id"] in drop_wm_ids)
+                or (r.get("tier") == "episodic" and r["id"] in drop_ep_ids)
+            )
+        ]
 
     # ── Phase NAI-0: Context Formatting ────────────────────────────
 
@@ -3017,8 +3335,6 @@ class BeamMemory:
         tier_weight_map = {1: TIER1_WEIGHT, 2: TIER2_WEIGHT, 3: TIER3_WEIGHT}
 
         final = []
-        recalled_episodic_ids = []
-        recalled_working_ids = []
         cursor = self.conn.cursor()
         now_iso = datetime.now().isoformat()
 
@@ -3050,19 +3366,51 @@ class BeamMemory:
             if row_dict.get("tier") == "episodic":
                 ep_tier = row_dict.get("degradation_tier") or 1
                 score *= tier_weight_map.get(ep_tier, 1.0)
-                recalled_episodic_ids.append(memory_id)
-            else:
-                recalled_working_ids.append(memory_id)
 
             row_dict["score"] = score
             row_dict["voice_scores"] = dict(r.voice_scores)
             final.append(row_dict)
-            if len(final) >= top_k:
-                break
+            # No early-break: dedup needs to see all candidates before
+            # truncation, otherwise a wm row dropped from top-K by an
+            # earlier-arriving ep summary can't be re-promoted when the
+            # ep summary itself gets deduped away. The engine already
+            # caps engine.recall(top_k=top_k * 2) above, bounding the loop.
 
         # Re-sort post-multiplier composition so the final order reflects
         # both RRF and the veracity/tier weights.
         final.sort(key=lambda x: x["score"], reverse=True)
+        # E3.a.3: apply identical cross-tier dedup as the linear path —
+        # keeps experiment Arm A vs Arm B comparison apples-to-apples
+        # rather than relying on the diversity rerank to handle
+        # summary↔source duplicates implicitly.
+        final = self._dedup_cross_tier_summary_links(final)
+        final = final[:top_k]
+        # Rebuild recall_count attribution lists from the deduped final
+        # so dropped duplicates aren't credited with a recall.
+        recalled_episodic_ids = [r["id"] for r in final if r.get("tier") == "episodic"]
+        recalled_working_ids = [r["id"] for r in final if r.get("tier") == "working"]
+
+        # E3.a.3 review fix: apply the same session/channel/scope guard
+        # the linear path uses (beam.py:~2734-2763). Pre-fix the
+        # polyphonic UPDATEs ran on `WHERE id IN (...)` with no scope
+        # check, so a recall returning a foreign-session row would bump
+        # that row's recall_count, polluting cross-session ranking. The
+        # in-loop construction this commit removed was reinforcing the
+        # gap; rebuilding from `final` post-dedup is the right shape, so
+        # add the scope guard here too.
+        if channel_id:
+            rec_scope = "(session_id = ? OR scope = 'global' OR channel_id = ?)"
+        elif author_id or author_type:
+            rec_scope = "(1=1)"
+        else:
+            rec_scope = "(session_id = ? OR scope = 'global')"
+
+        def _rec_scope_params() -> List:
+            if channel_id:
+                return [self.session_id, channel_id]
+            if author_id or author_type:
+                return []
+            return [self.session_id]
 
         # Update recall_count / last_recalled for engine results too —
         # the linear path updates them and downstream features (decay
@@ -3070,17 +3418,19 @@ class BeamMemory:
         # /review caught the missing update as a silent telemetry loss.
         if recalled_episodic_ids:
             placeholders = ",".join("?" * len(recalled_episodic_ids))
+            params = [now_iso, *recalled_episodic_ids, *_rec_scope_params()]
             self.conn.execute(
                 f"UPDATE episodic_memory SET recall_count = recall_count + 1, "
-                f"last_recalled = ? WHERE id IN ({placeholders})",
-                (now_iso, *recalled_episodic_ids),
+                f"last_recalled = ? WHERE id IN ({placeholders}) AND {rec_scope}",
+                tuple(params),
             )
         if recalled_working_ids:
             placeholders = ",".join("?" * len(recalled_working_ids))
+            params = [now_iso, *recalled_working_ids, *_rec_scope_params()]
             self.conn.execute(
                 f"UPDATE working_memory SET recall_count = recall_count + 1, "
-                f"last_recalled = ? WHERE id IN ({placeholders})",
-                (now_iso, *recalled_working_ids),
+                f"last_recalled = ? WHERE id IN ({placeholders}) AND {rec_scope}",
+                tuple(params),
             )
         if recalled_episodic_ids or recalled_working_ids:
             self.conn.commit()
@@ -4080,6 +4430,11 @@ class BeamMemory:
         self.conn.commit()
 
         # -- Episodic memory --
+        # Capture sqlite-vec availability once before the loop. Reused
+        # both for the cascade-cleanup below AND the episodic_embeddings
+        # import section further down.
+        vec_ok = _vec_available(self.conn)
+
         old_to_new_rowid = {}
         for item in data.get("episodic_memory", []):
             mid = item.get("id")
@@ -4090,6 +4445,45 @@ class BeamMemory:
                 old_to_new_rowid[item.get("rowid")] = existing["rowid"]
                 continue
             if existing and force:
+                # Cascade-cleanup vec_episodes before deleting the
+                # episodic_memory row. sqlite-vec's `vec_episodes` is
+                # a virtual table keyed by `episodic_memory.rowid`;
+                # without this DELETE the row vanishes from
+                # episodic_memory but its vector embedding stays in
+                # vec_episodes forever, pointing at a rowid that
+                # episodic_memory's AUTOINCREMENT will never re-issue.
+                # The INSERT below assigns a new rowid via lastrowid;
+                # the orphan from the deleted row would never be
+                # cleaned by natural reuse. Operators with high
+                # import churn would see vec_episodes grow indefinitely
+                # while episodic_memory stays bounded.
+                # /review (E2.a.5 Codex adversarial L6, deferred sibling
+                # cleanup item) flagged this as the canonical orphan
+                # site.
+                if vec_ok:
+                    try:
+                        cursor.execute(
+                            "DELETE FROM vec_episodes WHERE rowid = ?",
+                            (existing["rowid"],),
+                        )
+                    except sqlite3.Error as cleanup_exc:
+                        # Broad sqlite3.Error catch (covers
+                        # OperationalError, DatabaseError,
+                        # NotSupportedError, etc.) — `working_memory`
+                        # was already committed at line 3978, so
+                        # propagating a non-OperationalError mid-loop
+                        # would leave partial state. Best-effort
+                        # cleanup: log and continue with the
+                        # episodic_memory DELETE. Data integrity > orphan
+                        # cleanup. /review (Claude H2 + Codex H2 on
+                        # commit 1) flagged the narrow OperationalError
+                        # catch as a mid-import abort risk.
+                        logger.warning(
+                            "import_from_dict: vec_episodes cleanup "
+                            "failed for rowid=%s: %s; continuing with "
+                            "episodic DELETE (orphan may remain)",
+                            existing["rowid"], cleanup_exc,
+                        )
                 cursor.execute("DELETE FROM episodic_memory WHERE id = ?", (mid,))
                 stats["episodic_memory"]["overwritten"] += 1
             else:
@@ -4112,7 +4506,9 @@ class BeamMemory:
         self.conn.commit()
 
         # -- Episodic embeddings --
-        vec_ok = _vec_available(self.conn)
+        # vec_ok was set above before the episodic_memory loop so the
+        # cascade-cleanup of vec_episodes shares the same availability
+        # check. Reused here.
         for emb_item in data.get("episodic_embeddings", []):
             old_rowid = emb_item.get("rowid")
             new_rowid = old_to_new_rowid.get(old_rowid)

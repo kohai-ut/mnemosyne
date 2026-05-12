@@ -162,11 +162,15 @@ class TestE5EnginePlumbing:
     def test_engine_accepts_shared_connection(self, temp_db):
         """[E5 connection reuse] PolyphonicRecallEngine.__init__ must
         accept conn= so BeamMemory can share its thread-local
-        connection. Without this each recall call would spawn 4+ new
-        SQLite connections (one per voice + one for the engine itself)
-        — wasteful under load and inconsistent with the post-9f96ded
-        EpisodicGraph / VeracityConsolidator / BinaryVectorStore
-        pattern."""
+        connection. Without this each recall call would spawn multiple
+        new SQLite connections (one per subsystem + one for the engine
+        itself) — wasteful under load and inconsistent with the
+        post-9f96ded EpisodicGraph / VeracityConsolidator pattern.
+
+        Post-E5.a: the standalone BinaryVectorStore subsystem was
+        removed (vector voice now queries memory_embeddings directly),
+        so the engine's connection plumbing surface shrank to
+        graph + consolidator + the engine's own self.conn."""
         from mnemosyne.core.polyphonic_recall import PolyphonicRecallEngine
 
         # Bring up the schema via BeamMemory so the engine has tables to query.
@@ -176,10 +180,10 @@ class TestE5EnginePlumbing:
         # The constructor must accept conn= without raising.
         engine = PolyphonicRecallEngine(db_path=temp_db, conn=shared_conn)
 
-        # Verify the engine's subsystems also use the shared connection
-        # (this is the whole point of accepting it).
-        assert engine.vector_store.conn is shared_conn, (
-            "vector_store is not using the shared connection"
+        # Verify the engine and its subsystems all use the shared
+        # connection (this is the whole point of accepting it).
+        assert engine.conn is shared_conn, (
+            "engine self.conn is not the shared connection"
         )
         assert engine.graph.conn is shared_conn, (
             "graph is not using the shared connection"
