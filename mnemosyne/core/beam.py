@@ -4155,6 +4155,11 @@ class BeamMemory:
         self.conn.commit()
 
         # -- Episodic memory --
+        # Capture sqlite-vec availability once before the loop. Reused
+        # both for the cascade-cleanup below AND the episodic_embeddings
+        # import section further down.
+        vec_ok = _vec_available(self.conn)
+
         old_to_new_rowid = {}
         for item in data.get("episodic_memory", []):
             mid = item.get("id")
@@ -4165,6 +4170,45 @@ class BeamMemory:
                 old_to_new_rowid[item.get("rowid")] = existing["rowid"]
                 continue
             if existing and force:
+                # Cascade-cleanup vec_episodes before deleting the
+                # episodic_memory row. sqlite-vec's `vec_episodes` is
+                # a virtual table keyed by `episodic_memory.rowid`;
+                # without this DELETE the row vanishes from
+                # episodic_memory but its vector embedding stays in
+                # vec_episodes forever, pointing at a rowid that
+                # episodic_memory's AUTOINCREMENT will never re-issue.
+                # The INSERT below assigns a new rowid via lastrowid;
+                # the orphan from the deleted row would never be
+                # cleaned by natural reuse. Operators with high
+                # import churn would see vec_episodes grow indefinitely
+                # while episodic_memory stays bounded.
+                # /review (E2.a.5 Codex adversarial L6, deferred sibling
+                # cleanup item) flagged this as the canonical orphan
+                # site.
+                if vec_ok:
+                    try:
+                        cursor.execute(
+                            "DELETE FROM vec_episodes WHERE rowid = ?",
+                            (existing["rowid"],),
+                        )
+                    except sqlite3.Error as cleanup_exc:
+                        # Broad sqlite3.Error catch (covers
+                        # OperationalError, DatabaseError,
+                        # NotSupportedError, etc.) — `working_memory`
+                        # was already committed at line 3978, so
+                        # propagating a non-OperationalError mid-loop
+                        # would leave partial state. Best-effort
+                        # cleanup: log and continue with the
+                        # episodic_memory DELETE. Data integrity > orphan
+                        # cleanup. /review (Claude H2 + Codex H2 on
+                        # commit 1) flagged the narrow OperationalError
+                        # catch as a mid-import abort risk.
+                        logger.warning(
+                            "import_from_dict: vec_episodes cleanup "
+                            "failed for rowid=%s: %s; continuing with "
+                            "episodic DELETE (orphan may remain)",
+                            existing["rowid"], cleanup_exc,
+                        )
                 cursor.execute("DELETE FROM episodic_memory WHERE id = ?", (mid,))
                 stats["episodic_memory"]["overwritten"] += 1
             else:
@@ -4187,7 +4231,9 @@ class BeamMemory:
         self.conn.commit()
 
         # -- Episodic embeddings --
-        vec_ok = _vec_available(self.conn)
+        # vec_ok was set above before the episodic_memory loop so the
+        # cascade-cleanup of vec_episodes shares the same availability
+        # check. Reused here.
         for emb_item in data.get("episodic_embeddings", []):
             old_rowid = emb_item.get("rowid")
             new_rowid = old_to_new_rowid.get(old_rowid)
