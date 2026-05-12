@@ -292,108 +292,143 @@ class VeracityConsolidator:
                         veracity: str = "unknown", source: str = None) -> ConsolidatedFact:
         """
         Add or update a fact in consolidation.
-        
+
         Args:
             subject: Fact subject
             predicate: Fact predicate
             object: Fact object
             veracity: Veracity tier
             source: Source memory ID
-            
+
         Returns:
             ConsolidatedFact: The consolidated result
+
+        Concurrency: SELECT-then-INSERT/UPDATE wrapped in
+        ``_serialized_write``. Pre-fix two threads with same SPO
+        could both pass the no-match SELECT and both attempt
+        INSERT, raising IntegrityError. Bayesian confidence math
+        is path-dependent so concurrent UPDATEs also raced.
+
+        Post-fix: the helper's RLock serializes same-instance
+        callers + `BEGIN IMMEDIATE` serializes cross-connection
+        writers via the SQLite writer lock. Caller-contract caveat
+        for DEFERRED outer txs: see `_serialized_write` docstring.
+
+        Pre-DRY (PR #84) this method had its own inline
+        BEGIN IMMEDIATE pattern. The helper-based version here
+        unifies it with the other three write methods so all four
+        share one canonical pattern AND the instance RLock
+        protects all four (including consolidate_fact, which
+        previously lacked RLock acquisition).
         """
-        cursor = self.conn.cursor()
-        
-        # Check if fact already exists
-        cursor.execute("""
-            SELECT * FROM consolidated_facts
-            WHERE subject = ? AND predicate = ? AND object = ?
-        """, (subject, predicate, object))
-        
-        row = cursor.fetchone()
-        now = datetime.now().isoformat()
-        
-        if row:
-            # Update existing fact
-            new_confidence = self.bayesian_update(row["confidence"], veracity)
-            new_count = row["mention_count"] + 1
-            
-            sources = json.loads(row["sources_json"] or "[]")
-            if source and source not in sources:
-                sources.append(source)
-            
-            cursor.execute("""
-                UPDATE consolidated_facts
-                SET confidence = ?, mention_count = ?, last_seen = ?,
-                    sources_json = ?, veracity = ?, updated_at = ?
-                WHERE id = ?
-            """, (new_confidence, new_count, now, json.dumps(sources),
-                  veracity, now, row["id"]))
-            
-            self.conn.commit()
-            
-            return ConsolidatedFact(
-                subject=subject,
-                predicate=predicate,
-                object=object,
-                confidence=new_confidence,
-                mention_count=new_count,
-                first_seen=row["first_seen"],
-                last_seen=now,
-                sources=sources,
-                veracity=veracity
-            )
-        
-        else:
-            # Check for conflicts (same subject+predicate, different object)
+        with self._serialized_write():
+            cursor = self.conn.cursor()
+
+            # Check if fact already exists
             cursor.execute("""
                 SELECT * FROM consolidated_facts
-                WHERE subject = ? AND predicate = ? AND object != ?
+                WHERE subject = ? AND predicate = ? AND object = ?
             """, (subject, predicate, object))
-            
-            conflicts = cursor.fetchall()
-            
-            # Insert new fact
-            fact_id = f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]
-            base_confidence = VERACITY_WEIGHTS.get(veracity, 0.8) * 0.5
-            
-            sources = [source] if source else []
-            
-            cursor.execute("""
-                INSERT INTO consolidated_facts
-                (id, subject, predicate, object, confidence, mention_count,
-                 first_seen, last_seen, sources_json, veracity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (fact_id, subject, predicate, object, base_confidence, 1,
-                  now, now, json.dumps(sources), veracity))
-            
-            self.conn.commit()
-            
-            # Record conflicts
-            for conflict in conflicts:
-                self._record_conflict(fact_id, conflict["id"], "contradiction")
-            
-            return ConsolidatedFact(
-                subject=subject,
-                predicate=predicate,
-                object=object,
-                confidence=base_confidence,
-                mention_count=1,
-                first_seen=now,
-                last_seen=now,
-                sources=sources,
-                veracity=veracity
-            )
-    
-    def _record_conflict(self, fact_a_id: str, fact_b_id: str, conflict_type: str):
-        """Record a conflict between two facts."""
+
+            row = cursor.fetchone()
+            now = datetime.now().isoformat()
+
+            if row:
+                # Update existing fact
+                new_confidence = self.bayesian_update(row["confidence"], veracity)
+                new_count = row["mention_count"] + 1
+
+                sources = json.loads(row["sources_json"] or "[]")
+                if source and source not in sources:
+                    sources.append(source)
+
+                cursor.execute("""
+                    UPDATE consolidated_facts
+                    SET confidence = ?, mention_count = ?, last_seen = ?,
+                        sources_json = ?, veracity = ?, updated_at = ?
+                    WHERE id = ?
+                """, (new_confidence, new_count, now, json.dumps(sources),
+                      veracity, now, row["id"]))
+
+                return ConsolidatedFact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=object,
+                    confidence=new_confidence,
+                    mention_count=new_count,
+                    first_seen=row["first_seen"],
+                    last_seen=now,
+                    sources=sources,
+                    veracity=veracity
+                )
+
+            else:
+                # Check for conflicts (same subject+predicate, different object)
+                cursor.execute("""
+                    SELECT * FROM consolidated_facts
+                    WHERE subject = ? AND predicate = ? AND object != ?
+                """, (subject, predicate, object))
+
+                conflicts = cursor.fetchall()
+
+                # Insert new fact
+                fact_id = f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]
+                base_confidence = VERACITY_WEIGHTS.get(veracity, 0.8) * 0.5
+
+                sources = [source] if source else []
+
+                cursor.execute("""
+                    INSERT INTO consolidated_facts
+                    (id, subject, predicate, object, confidence, mention_count,
+                     first_seen, last_seen, sources_json, veracity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (fact_id, subject, predicate, object, base_confidence, 1,
+                      now, now, json.dumps(sources), veracity))
+
+                # Record conflicts. Pass `commit=False` so the helper's
+                # internal commit doesn't end our `_serialized_write`
+                # transaction mid-loop — see _record_conflict docstring
+                # for the atomicity rationale.
+                for conflict in conflicts:
+                    self._record_conflict(
+                        fact_id, conflict["id"], "contradiction",
+                        commit=False,
+                    )
+
+                return ConsolidatedFact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=object,
+                    confidence=base_confidence,
+                    mention_count=1,
+                    first_seen=now,
+                    last_seen=now,
+                    sources=sources,
+                    veracity=veracity
+                )
+
+    def _record_conflict(self, fact_a_id: str, fact_b_id: str,
+                         conflict_type: str, commit: bool = True):
+        """Record a conflict between two facts.
+
+        commit (default True): whether to call self.conn.commit() after
+            the INSERT. `consolidate_fact` passes `commit=False` when
+            invoking this helper from within its own `_serialized_write`
+            scope so the fact INSERT and its conflict rows commit
+            atomically as part of the outer transaction. Without this
+            opt-out, _record_conflict's commit would end the outer
+            transaction mid-loop, leaving the fact INSERT durable but
+            allowing later conflict-record failures to leak partial
+            state. /review (E2.a.5 4-source HIGH) caught this pattern
+            in the inline version; preserved in the DRY refactor.
+        """
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO conflicts (fact_a_id, fact_b_id, conflict_type)
             VALUES (?, ?, ?)
         """, (fact_a_id, fact_b_id, conflict_type))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
     
     def resolve_conflict(self, conflict_id: int, winning_fact_id: str):
         """

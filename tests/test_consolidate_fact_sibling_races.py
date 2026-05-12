@@ -507,3 +507,76 @@ class TestReviewHardening:
     # Adding a deterministic delay-injection test would require a
     # different injection point (e.g., a hook on _serialized_write
     # itself). Tracked as a future test-coverage improvement.
+
+    def test_consolidate_fact_same_connection_serializes_via_rlock(
+        self, temp_db
+    ):
+        """Post-DRY-refactor: `consolidate_fact` uses `_serialized_write`
+        and acquires `_write_lock` like the other three write methods.
+        Pre-DRY (PR #84's inline pattern), `consolidate_fact` did NOT
+        acquire `_write_lock` — so two threads sharing one
+        VeracityConsolidator instance could still race within a single
+        SQL transaction (BEGIN IMMEDIATE protects across connections
+        but not within one).
+
+        Mirrors `test_same_connection_writers_serialize_via_rlock` but
+        exercises `consolidate_fact` rather than
+        `resolve_conflict_by_facts`. Closes the same-conn race shape
+        for the fourth and final write method on
+        VeracityConsolidator."""
+        import time
+        cons = VeracityConsolidator(db_path=temp_db)
+
+        # Inject delay inside `bayesian_update` (UPDATE branch's
+        # only Python-level work outside the SQL UPDATE itself) to
+        # widen the critical section.
+        original_bayesian = cons.bayesian_update
+
+        def slow_bayesian(current_confidence, veracity):
+            time.sleep(0.02)
+            return original_bayesian(current_confidence, veracity)
+
+        cons.bayesian_update = slow_bayesian  # type: ignore
+
+        # Seed so concurrent calls hit the UPDATE branch.
+        cons.consolidate_fact("Diana", "is", "founder", "stated", "seed")
+
+        exceptions: List[BaseException] = []
+        barrier = threading.Barrier(4)
+
+        def in_thread(i: int):
+            try:
+                barrier.wait()
+                # SHARED instance — exercises the same-conn race path.
+                cons.consolidate_fact(
+                    "Diana", "is", "founder", "stated", f"src_{i}",
+                )
+            except BaseException as exc:
+                exceptions.append(exc)
+
+        threads = [
+            threading.Thread(target=in_thread, args=(i,))
+            for i in range(4)
+        ]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        del cons.bayesian_update  # type: ignore
+
+        # No exceptions (RLock prevented same-conn interleave).
+        assert not exceptions, (
+            f"same-conn race in consolidate_fact: {exceptions[:1]} — "
+            "DRY refactor's RLock acquisition broken"
+        )
+        # mention_count should be exactly 5: 1 seed + 4 concurrent
+        # updates. Pre-DRY (no RLock for consolidate_fact) the race
+        # would lose at least one update.
+        row = cons.conn.execute(
+            "SELECT mention_count FROM consolidated_facts "
+            "WHERE subject = 'Diana'"
+        ).fetchone()
+        assert row["mention_count"] == 5, (
+            f"expected mention_count == 5 (seed + 4 concurrent "
+            f"updates), got {row['mention_count']} — same-conn race "
+            "lost update(s) in consolidate_fact"
+        )
