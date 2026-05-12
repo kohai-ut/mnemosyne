@@ -128,6 +128,22 @@ class VeracityConsolidator:
         else:
             self.db_path = db_path or Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne.db"
             self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            # Apply the same PRAGMA settings BeamMemory's _get_connection
+            # uses (journal_mode=WAL, busy_timeout=5000ms). Without these,
+            # `BEGIN IMMEDIATE` in `consolidate_fact` runs under default
+            # `journal_mode=DELETE` which blocks readers too AND raises
+            # `database is locked` immediately under contention instead
+            # of waiting through the busy_timeout. /review (Claude
+            # adversarial C3) caught the connection-setup gap.
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA busy_timeout=5000")
+            except sqlite3.Error:
+                # Best-effort: some constrained environments (e.g.,
+                # in-memory DBs) don't support WAL. Continue without —
+                # the BEGIN IMMEDIATE path still works, just with
+                # different contention semantics.
+                pass
         self.conn.row_factory = sqlite3.Row
         self._owns_connection = conn is None
         self._init_tables()
@@ -195,108 +211,215 @@ class VeracityConsolidator:
                         veracity: str = "unknown", source: str = None) -> ConsolidatedFact:
         """
         Add or update a fact in consolidation.
-        
+
         Args:
             subject: Fact subject
             predicate: Fact predicate
             object: Fact object
             veracity: Veracity tier
             source: Source memory ID
-            
+
         Returns:
             ConsolidatedFact: The consolidated result
+
+        Concurrency: the SELECT-by-SPO → INSERT/UPDATE pattern is
+        race-vulnerable under naive WAL execution. Two threads both
+        passing the SELECT-no-match check and both attempting INSERT
+        would race on the deterministic PRIMARY KEY: one INSERT
+        succeeds, the other raises `IntegrityError`. Bayesian
+        confidence math is path-dependent (``new = old + (1-old) *
+        weight * 0.3``), so concurrent UPDATEs also race — the
+        compute-then-write pattern lets a later UPDATE overwrite an
+        earlier UPDATE's effect.
+
+        Fix: wrap the read-then-write in ``BEGIN IMMEDIATE`` so the
+        whole sequence is serialized at the SQLite writer-lock
+        level. Acquires a RESERVED lock at BEGIN, holds it through
+        SELECT + INSERT/UPDATE + conflict-recording, releases at
+        COMMIT. Concurrent callers queue rather than race. Lock is
+        database-wide across connections — works under BeamMemory's
+        thread-local connection model.
+
+        Nested-transaction handling: if the caller is already in a
+        transaction, ``BEGIN IMMEDIATE`` would raise
+        ``OperationalError: cannot start a transaction within a
+        transaction``. We detect via ``conn.in_transaction`` and
+        skip the BEGIN. **Caveat (Codex adversarial H3 + Claude H3):**
+        a DEFERRED outer transaction (Python sqlite3's default
+        implicit tx, the kind opened automatically on first
+        modifying SQL) does NOT acquire the writer lock until its
+        own first INSERT/UPDATE. Two threads each in their own
+        DEFERRED outer tx can both pass our SELECT-no-match check
+        before either writes — race window reopens. Race safety
+        within a caller-owned outer tx therefore requires either
+        (a) the outer tx is `BEGIN IMMEDIATE` or `BEGIN EXCLUSIVE`,
+        OR (b) the caller is the only writer (e.g., E2's
+        single-threaded batch enrichment loop — only one thread
+        runs the loop, so there's no concurrent consolidate_fact
+        call to race against). Document this assumption in the
+        caller's code.
+
+        Failure handling: if ``BEGIN IMMEDIATE`` raises
+        ``OperationalError`` (e.g., ``database is locked`` after
+        ``busy_timeout`` expiry), we re-raise rather than silently
+        proceeding without the lock — silent fallthrough would
+        reintroduce the exact race this method claims to close.
+        /review (Codex structured P2 + Codex adversarial HIGH +
+        Maintainability + Claude — 4-source HIGH) caught the
+        original silent-fallthrough as a correctness regression.
+
+        Other write methods on this class (``resolve_conflict``,
+        ``resolve_conflict_by_facts``, ``run_consolidation_pass``)
+        have similar SELECT-then-write patterns and are NOT
+        wrapped by this fix. Concurrent same-conflict resolution
+        from multiple writers can still be last-writer-wins. Out
+        of scope for this PR; tracked separately.
         """
         cursor = self.conn.cursor()
-        
-        # Check if fact already exists
-        cursor.execute("""
-            SELECT * FROM consolidated_facts
-            WHERE subject = ? AND predicate = ? AND object = ?
-        """, (subject, predicate, object))
-        
-        row = cursor.fetchone()
-        now = datetime.now().isoformat()
-        
-        if row:
-            # Update existing fact
-            new_confidence = self.bayesian_update(row["confidence"], veracity)
-            new_count = row["mention_count"] + 1
-            
-            sources = json.loads(row["sources_json"] or "[]")
-            if source and source not in sources:
-                sources.append(source)
-            
-            cursor.execute("""
-                UPDATE consolidated_facts
-                SET confidence = ?, mention_count = ?, last_seen = ?,
-                    sources_json = ?, veracity = ?, updated_at = ?
-                WHERE id = ?
-            """, (new_confidence, new_count, now, json.dumps(sources),
-                  veracity, now, row["id"]))
-            
-            self.conn.commit()
-            
-            return ConsolidatedFact(
-                subject=subject,
-                predicate=predicate,
-                object=object,
-                confidence=new_confidence,
-                mention_count=new_count,
-                first_seen=row["first_seen"],
-                last_seen=now,
-                sources=sources,
-                veracity=veracity
-            )
-        
-        else:
-            # Check for conflicts (same subject+predicate, different object)
+
+        # Serialize concurrent consolidate_fact calls. Skip if
+        # already inside a caller-supplied transaction (see caveat
+        # in docstring about DEFERRED outer-tx races).
+        started_tx = False
+        if not self.conn.in_transaction:
+            # Let OperationalError propagate. If `database is
+            # locked` fires after busy_timeout, the caller's
+            # retry / error-handler is the right place to decide
+            # what to do — silently running the SELECT-then-write
+            # without the lock would reintroduce the race we just
+            # fixed.
+            cursor.execute("BEGIN IMMEDIATE")
+            started_tx = True
+
+        try:
+            # Check if fact already exists
             cursor.execute("""
                 SELECT * FROM consolidated_facts
-                WHERE subject = ? AND predicate = ? AND object != ?
+                WHERE subject = ? AND predicate = ? AND object = ?
             """, (subject, predicate, object))
-            
-            conflicts = cursor.fetchall()
-            
-            # Insert new fact
-            fact_id = f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]
-            base_confidence = VERACITY_WEIGHTS.get(veracity, 0.8) * 0.5
-            
-            sources = [source] if source else []
-            
-            cursor.execute("""
-                INSERT INTO consolidated_facts
-                (id, subject, predicate, object, confidence, mention_count,
-                 first_seen, last_seen, sources_json, veracity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (fact_id, subject, predicate, object, base_confidence, 1,
-                  now, now, json.dumps(sources), veracity))
-            
-            self.conn.commit()
-            
-            # Record conflicts
-            for conflict in conflicts:
-                self._record_conflict(fact_id, conflict["id"], "contradiction")
-            
-            return ConsolidatedFact(
-                subject=subject,
-                predicate=predicate,
-                object=object,
-                confidence=base_confidence,
-                mention_count=1,
-                first_seen=now,
-                last_seen=now,
-                sources=sources,
-                veracity=veracity
-            )
+
+            row = cursor.fetchone()
+            now = datetime.now().isoformat()
+
+            if row:
+                # Update existing fact
+                new_confidence = self.bayesian_update(row["confidence"], veracity)
+                new_count = row["mention_count"] + 1
+
+                sources = json.loads(row["sources_json"] or "[]")
+                if source and source not in sources:
+                    sources.append(source)
+
+                cursor.execute("""
+                    UPDATE consolidated_facts
+                    SET confidence = ?, mention_count = ?, last_seen = ?,
+                        sources_json = ?, veracity = ?, updated_at = ?
+                    WHERE id = ?
+                """, (new_confidence, new_count, now, json.dumps(sources),
+                      veracity, now, row["id"]))
+
+                if started_tx:
+                    self.conn.commit()
+
+                return ConsolidatedFact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=object,
+                    confidence=new_confidence,
+                    mention_count=new_count,
+                    first_seen=row["first_seen"],
+                    last_seen=now,
+                    sources=sources,
+                    veracity=veracity
+                )
+
+            else:
+                # Check for conflicts (same subject+predicate, different object)
+                cursor.execute("""
+                    SELECT * FROM consolidated_facts
+                    WHERE subject = ? AND predicate = ? AND object != ?
+                """, (subject, predicate, object))
+
+                conflicts = cursor.fetchall()
+
+                # Insert new fact
+                fact_id = f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]
+                base_confidence = VERACITY_WEIGHTS.get(veracity, 0.8) * 0.5
+
+                sources = [source] if source else []
+
+                cursor.execute("""
+                    INSERT INTO consolidated_facts
+                    (id, subject, predicate, object, confidence, mention_count,
+                     first_seen, last_seen, sources_json, veracity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (fact_id, subject, predicate, object, base_confidence, 1,
+                      now, now, json.dumps(sources), veracity))
+
+                # Record conflicts. Pass `commit=False` so the helper
+                # doesn't end our `BEGIN IMMEDIATE` transaction mid-loop.
+                # /review caught the pre-fix unconditional commit as a
+                # 4-source HIGH atomicity breach.
+                for conflict in conflicts:
+                    self._record_conflict(
+                        fact_id, conflict["id"], "contradiction",
+                        commit=False,
+                    )
+
+                if started_tx:
+                    self.conn.commit()
+
+                return ConsolidatedFact(
+                    subject=subject,
+                    predicate=predicate,
+                    object=object,
+                    confidence=base_confidence,
+                    mention_count=1,
+                    first_seen=now,
+                    last_seen=now,
+                    sources=sources,
+                    veracity=veracity
+                )
+        except Exception:
+            # Roll back our own transaction on any failure; if the
+            # caller owns the transaction we leave it for them to
+            # handle (their except path).
+            if started_tx:
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error as rb_exc:
+                    # Rollback failure leaves the connection in an
+                    # undefined state. Log the original + rollback
+                    # errors so operators can diagnose; the original
+                    # exception still propagates.
+                    logger.error(
+                        "consolidate_fact: rollback failed after error "
+                        "(connection may be in undefined state): %s",
+                        rb_exc,
+                    )
+            raise
     
-    def _record_conflict(self, fact_a_id: str, fact_b_id: str, conflict_type: str):
-        """Record a conflict between two facts."""
+    def _record_conflict(self, fact_a_id: str, fact_b_id: str,
+                         conflict_type: str, commit: bool = True):
+        """Record a conflict between two facts.
+
+        commit (default True): whether to call self.conn.commit() after
+            the INSERT. `consolidate_fact` passes `commit=False` when
+            invoking this helper from within its own `BEGIN IMMEDIATE`
+            scope so the fact INSERT and its conflict rows commit
+            atomically (rather than _record_conflict's commit ending
+            the outer transaction mid-flight). /review (4-source
+            convergence: Codex structured + Codex adversarial + Claude
+            adversarial + Maintainability) caught the original
+            unconditional-commit as the primary atomicity breach.
+        """
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO conflicts (fact_a_id, fact_b_id, conflict_type)
             VALUES (?, ?, ?)
         """, (fact_a_id, fact_b_id, conflict_type))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
     
     def resolve_conflict(self, conflict_id: int, winning_fact_id: str):
         """
