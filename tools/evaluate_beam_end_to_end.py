@@ -75,6 +75,25 @@ DEFAULT_MODEL = "deepseek-v4-pro"
 FALLBACK_MODELS = []  # Disabled — fallback cascade burned $30 in credits
 DEFAULT_TOP_K = 10  # Memories to retrieve per question
 MAX_MEMORY_CONTEXT_CHARS = 8000  # Max chars of retrieved context to send to LLM
+
+
+# C31: env-var truthy parser. Accepts standard truthy values
+# (1/true/yes/on, case-insensitive) and explicit falsies (0/false/no/off).
+# Strips whitespace so accidental leading/trailing spaces in shell
+# exports don't get treated as falsy. Anything else → False.
+# Pre-fix the parser was `lower() in ("1", "true", "yes")` which
+# rejected `on` and was whitespace-sensitive — surprised at least one
+# operator running with `MNEMOSYNE_BENCHMARK_PURE_RECALL=on`.
+_ENV_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_truthy(name: str) -> bool:
+    """Return True iff env var `name` is set to a canonical truthy value.
+
+    Truthy: 1, true, yes, on (case-insensitive, whitespace-stripped).
+    Everything else (including 0, false, no, off, empty, garbage) is False.
+    """
+    return os.environ.get(name, "").strip().lower() in _ENV_TRUTHY_VALUES
 BENCHMARK_QUERIES_PER_CONV = 50  # Max probing questions per conversation
 RESULTS_FILE = PROJECT_ROOT / "results" / "beam_e2e_results.json"
 
@@ -1075,7 +1094,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     # LLM-ceiling-with-help on isolated abilities; the BEAM-recovery
     # experiment instead needs to compare Arm A vs Arm B vs Arm C on
     # the recall surface itself.
-    _pure_recall = os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes")
+    _pure_recall = _env_truthy("MNEMOSYNE_BENCHMARK_PURE_RECALL")
 
     total_msgs = len(conversation_messages) if conversation_messages else 0
 
@@ -1115,7 +1134,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     # Controlled by FULL_CONTEXT_MODE env var.
     # HYBRID: try context→value matching first for factual questions (IE/MR/KU),
     # then fall through to full-context for complex reasoning (ABS/CR/EO/SUM/TR).
-    _full_context = os.environ.get("FULL_CONTEXT_MODE", "").lower() in ("1", "true", "yes")
+    _full_context = _env_truthy("FULL_CONTEXT_MODE")
     # Precedence: pure-recall overrides full-context. The point of
     # pure-recall is to force every answer through Mnemosyne recall;
     # full-context's "ship the whole conversation to the LLM" path
@@ -1654,10 +1673,10 @@ def main():
     # Mode resolution + banner. Pure-recall overrides full-context
     # because the bypass that full-context provides (raw conversation
     # straight to LLM) is exactly what pure-recall is meant to forbid.
-    _pure_recall_env = os.environ.get("MNEMOSYNE_BENCHMARK_PURE_RECALL", "").lower() in ("1", "true", "yes")
+    _pure_recall_env = _env_truthy("MNEMOSYNE_BENCHMARK_PURE_RECALL")
     if args.pure_recall or _pure_recall_env:
         os.environ["MNEMOSYNE_BENCHMARK_PURE_RECALL"] = "1"
-        if args.full_context or os.environ.get("FULL_CONTEXT_MODE"):
+        if args.full_context or _env_truthy("FULL_CONTEXT_MODE"):
             # Conflict: warn loudly so the operator isn't surprised.
             print("  Mode: PURE-RECALL (overrides FULL_CONTEXT/--full-context — "
                   "every answer goes through Mnemosyne recall)")

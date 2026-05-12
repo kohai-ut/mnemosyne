@@ -169,6 +169,56 @@ TOOL_WEIGHT = float(os.environ.get("MNEMOSYNE_TOOL_WEIGHT", "0.5"))
 IMPORTED_WEIGHT = float(os.environ.get("MNEMOSYNE_IMPORTED_WEIGHT", "0.6"))
 UNKNOWN_WEIGHT = float(os.environ.get("MNEMOSYNE_UNKNOWN_WEIGHT", "0.8"))
 
+
+def _detect_veracity_weight_overrides() -> List[str]:
+    """C32: return a list of `MNEMOSYNE_*_WEIGHT` env vars that are set.
+
+    Used at module-load time to emit a single WARNING per process when
+    operators override recall-side veracity weights. The consolidator
+    (`veracity_consolidation.VERACITY_WEIGHTS`) does NOT honor these
+    env vars, so any override creates drift between Bayesian
+    compounding (consolidation) and the recall multiplier — breaking
+    the invariant 'consolidated-as-N also ranks at N.'
+    """
+    return [
+        name for name in (
+            "MNEMOSYNE_STATED_WEIGHT",
+            "MNEMOSYNE_INFERRED_WEIGHT",
+            "MNEMOSYNE_TOOL_WEIGHT",
+            "MNEMOSYNE_IMPORTED_WEIGHT",
+            "MNEMOSYNE_UNKNOWN_WEIGHT",
+        )
+        if name in os.environ
+    ]
+
+
+def _warn_about_veracity_weight_overrides() -> bool:
+    """Log a single WARNING if any `MNEMOSYNE_*_WEIGHT` env var is set.
+
+    Returns True if a warning was emitted. Idempotent: calling twice
+    will emit twice — callers control firing frequency. Module-load
+    calls this once below.
+
+    Testable without reloading the module: tests can monkeypatch env
+    and call this directly + assert on caplog.
+    """
+    overrides = _detect_veracity_weight_overrides()
+    if not overrides:
+        return False
+    logger.warning(
+        "Veracity weight env overrides detected: %s. Recall scoring will "
+        "honor the override, but consolidation Bayesian compounding "
+        "(veracity_consolidation.VERACITY_WEIGHTS) does NOT — the two "
+        "will drift. Set matching values in veracity_consolidation.py "
+        "OR accept that 'consolidated-as-N also ranks at N' invariant "
+        "is broken until the consolidator is taught the same overrides.",
+        ", ".join(overrides),
+    )
+    return True
+
+
+_warn_about_veracity_weight_overrides()
+
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
 if VEC_TYPE not in ("float32", "int8", "bit"):
@@ -2668,7 +2718,16 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": round(relevance, 4),
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: dense_score is 0.0 by design for EM
+                        # fallback rows — they reach this loop precisely
+                        # because the vec/FTS-driven episodic path
+                        # produced no candidates (no `sim` is computed
+                        # here). Pre-fix this line looked up
+                        # `wm_vec_sims[row["id"]]` which always returned
+                        # 0.0 since `row["id"]` is an episodic id, not
+                        # a working-memory id — same numeric value,
+                        # misleading provenance. Now explicit.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
