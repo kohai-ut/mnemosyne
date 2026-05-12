@@ -2,7 +2,7 @@
 
 Pre-fix, `tools/evaluate_beam_end_to_end.py` ran with harness oracles
 (TR timeline, CR injection, IE/KU `_context_facts`, RECENT CONVERSATION
-raw-message injection) by default — without pure-recall mode the
+raw-message injection) by default -- without pure-recall mode the
 oracles produce answers that bypass `BeamMemory.recall()`, contaminating
 arm-vs-arm comparisons.
 
@@ -60,7 +60,7 @@ class TestPreflightRefusesWithoutPureRecall:
     (no dataset load, no LLM calls)."""
 
     def test_no_flags_no_env_exits_with_error(self, clean_env):
-        """Default invocation — should refuse."""
+        """Default invocation -- should refuse."""
         result = _run_harness("--sample", "1", "--scales", "100K")
         assert result.returncode == 2, (
             f"Expected exit code 2 (preflight refusal); got {result.returncode}.\n"
@@ -71,7 +71,7 @@ class TestPreflightRefusesWithoutPureRecall:
         )
 
     def test_full_context_alone_is_not_enough(self, clean_env):
-        """`FULL_CONTEXT_MODE=1` doesn't disable the oracles — it adds
+        """`FULL_CONTEXT_MODE=1` doesn't disable the oracles -- it adds
         a different bypass. Should still refuse without pure-recall."""
         result = _run_harness(
             "--sample", "1", "--scales", "100K",

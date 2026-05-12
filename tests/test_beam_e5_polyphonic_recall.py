@@ -1,8 +1,8 @@
-"""Regression tests for E5 — wire PolyphonicRecallEngine under feature flag.
+"""Regression tests for E5 -- wire PolyphonicRecallEngine under feature flag.
 
 Pre-E5: `PolyphonicRecallEngine` (mnemosyne/core/polyphonic_recall.py)
 existed as a complete 4-voice + RRF + diversity-rerank + budget-aware
-context-assembly implementation, but it was dead code — no production
+context-assembly implementation, but it was dead code -- no production
 caller imported it. Commit 9f96ded's "polyphonic recall" was actually
 inline graph_bonus + fact_bonus added to BeamMemory's linear scorer
 (beam.py:2101-2156), not the engine.
@@ -10,19 +10,19 @@ inline graph_bonus + fact_bonus added to BeamMemory's linear scorer
 Post-E5:
   - `MNEMOSYNE_POLYPHONIC_RECALL=1` activates the polyphonic engine
     inside `BeamMemory.recall()`
-  - Default (flag unset or "0"): existing linear scorer runs unchanged —
+  - Default (flag unset or "0"): existing linear scorer runs unchanged --
     production behavior preserved
   - Flag ON: engine produces ranked candidates via RRF fusion across 4
     voices (vector + graph + fact + temporal), diversity-reranks them,
     and assembles context within budget. The inline graph_bonus and
     fact_bonus terms in the linear scorer are bypassed (engine handles
     those itself).
-  - Per-result `voice_scores` field carries provenance — operators can
+  - Per-result `voice_scores` field carries provenance -- operators can
     see WHICH voices contributed to a given ranking.
   - Engine reuses BeamMemory's shared sqlite connection rather than
     spawning 4+ new connections per recall call.
 
-This unblocks the experiment's "strongest available recall layer" —
+This unblocks the experiment's "strongest available recall layer" --
 all arms run with flag=ON to test against the polyphonic engine
 instead of the inline bonus shortcut.
 """
@@ -80,7 +80,7 @@ class TestE5FeatureFlag:
         ])
 
         results = beam.recall("deploy", top_k=10)
-        assert results, "recall returned 0 — sanity check"
+        assert results, "recall returned 0 -- sanity check"
         _POLYPHONIC_KEYS = {"vector", "graph", "fact", "temporal"}
         for r in results:
             vs = r.get("voice_scores", {})
@@ -107,7 +107,7 @@ class TestE5FeatureFlag:
     def test_flag_on_uses_polyphonic_engine(
         self, temp_db, monkeypatch, disable_llm
     ):
-        """[E5] Flag ON: results carry voice_scores provenance — the
+        """[E5] Flag ON: results carry voice_scores provenance -- the
         signal that the engine ran instead of the linear scorer.
         Per-signal observability is a hard requirement (the
         OpenViking-style 'show me which voice contributed').
@@ -122,7 +122,7 @@ class TestE5FeatureFlag:
         ])
 
         results = beam.recall("Alice deploy auth", top_k=10)
-        assert results, "polyphonic recall returned 0 — engine wired wrong"
+        assert results, "polyphonic recall returned 0 -- engine wired wrong"
         # At least one result must carry voice_scores; an empty dict is
         # not enough (would mean RRF combined nothing). The engine's
         # RRF accumulates contributions from each contributing voice.
@@ -137,7 +137,7 @@ class TestE5FeatureFlag:
     def test_flag_on_then_off_swaps_paths(
         self, temp_db, monkeypatch, disable_llm
     ):
-        """The flag is read PER CALL, not at __init__ time — operators
+        """The flag is read PER CALL, not at __init__ time -- operators
         can toggle the engine without rebuilding BeamMemory. Critical
         for A/B experiments inside the same process.
 
@@ -180,7 +180,7 @@ class TestE5EnginePlumbing:
         accept conn= so BeamMemory can share its thread-local
         connection. Without this each recall call would spawn multiple
         new SQLite connections (one per subsystem + one for the engine
-        itself) — wasteful under load and inconsistent with the
+        itself) -- wasteful under load and inconsistent with the
         post-9f96ded EpisodicGraph / VeracityConsolidator pattern.
 
         Post-E5.a: the standalone BinaryVectorStore subsystem was
@@ -273,7 +273,7 @@ class TestE5FilterEnforcement:
     def test_engine_path_returns_global_scope_cross_session(
         self, temp_db, monkeypatch, disable_llm
     ):
-        """Global-scope rows MUST surface across sessions — that's
+        """Global-scope rows MUST surface across sessions -- that's
         the design of `scope='global'`."""
         monkeypatch.setenv("MNEMOSYNE_POLYPHONIC_RECALL", "1")
         beam_a = BeamMemory(session_id="A", db_path=temp_db)
@@ -290,7 +290,7 @@ class TestE5FilterEnforcement:
     def test_engine_path_filters_superseded(
         self, temp_db, monkeypatch, disable_llm
     ):
-        """Rows with superseded_by set are tombstoned — they must
+        """Rows with superseded_by set are tombstoned -- they must
         NOT surface in recall regardless of flag state."""
         monkeypatch.setenv("MNEMOSYNE_POLYPHONIC_RECALL", "1")
         beam = BeamMemory(session_id="s1", db_path=temp_db)
@@ -437,7 +437,7 @@ class TestE5EngineCache:
         beam.recall("Alice", top_k=10)
         engine_second = beam._polyphonic_engine
         assert engine_second is engine_first, (
-            "engine instance changed between calls — cache isn't holding"
+            "engine instance changed between calls -- cache isn't holding"
         )
 
 

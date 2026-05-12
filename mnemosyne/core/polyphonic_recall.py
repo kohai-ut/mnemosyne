@@ -52,7 +52,7 @@ def _env_disabled(name: str) -> bool:
     """A/B toggle helper: return True iff env var is set to a falsy
     value (`0`/`false`/`no`/`off`). Used by the per-voice ablation
     toggles. Mirrors the helper in `beam.py` so each module is
-    self-contained — duplicated rather than imported to avoid a
+    self-contained -- duplicated rather than imported to avoid a
     cross-module dependency for a 4-line helper.
     """
     val = os.environ.get(name, "").strip().lower()
@@ -97,14 +97,14 @@ class PolyphonicRecallEngine:
             engine and its subsystems (vector_store / graph /
             consolidator / temporal_voice) reuse this connection
             instead of spawning their own. Required for safe use under
-            BeamMemory's thread-local connection model — without this,
+            BeamMemory's thread-local connection model -- without this,
             each polyphonic recall call would open 4+ new connections
             (one per voice + one per subsystem) which both wastes
             resources and risks WAL-readback inconsistency under
             concurrent writers.
         """
         self.db_path = db_path or Path.home() / ".hermes" / "mnemosyne" / "data" / "mnemosyne.db"
-        self.conn = conn  # may be None — voices fall back to per-call open
+        self.conn = conn  # may be None -- voices fall back to per-call open
 
         # Initialize subsystems. Each accepts an optional conn= since
         # 9f96ded; pass through so they share our handle.
@@ -162,7 +162,7 @@ class PolyphonicRecallEngine:
         Voice 1: Dense semantic similarity over WM + EM.
 
         Queries the production-canonical dense embedding store
-        (`memory_embeddings`) — the same source the linear recall path
+        (`memory_embeddings`) -- the same source the linear recall path
         uses via `_wm_vec_search` / `_in_memory_vec_search` (the
         numpy-cosine fallback layer in beam.py). Pre-fix this voice
         queried the standalone `binary_vectors` table which production
@@ -180,14 +180,14 @@ class PolyphonicRecallEngine:
         available (same fast-path the linear scorer uses via
         `beam._vec_search`); falls through to numpy cosine over
         `memory_embeddings` on any failure. WM tier uses numpy cosine
-        (matches the linear path — no sqlite-vec WM index exists
+        (matches the linear path -- no sqlite-vec WM index exists
         today).
 
         Reads both WM and EM tiers, filters out invalidated /
         superseded / expired rows (mirror of `_wm_vec_search` WHERE
         clauses for both tiers), and ranks by cosine similarity.
         Dedups across WM/EM by `memory_id` keeping the
-        higher-similarity occurrence — without this, a memory that
+        higher-similarity occurrence -- without this, a memory that
         exists in both tiers post-E3 would be double-counted in RRF
         and silently cap unique candidates below `top_k=20`.
 
@@ -228,13 +228,13 @@ class PolyphonicRecallEngine:
             now_iso = datetime.now().isoformat()
             by_id: Dict[str, RecallResult] = {}
 
-            # --- EM tier — prefer sqlite-vec ANN, fall back to numpy ---
+            # --- EM tier -- prefer sqlite-vec ANN, fall back to numpy ---
             #
             # The linear path uses sqlite-vec's `vec_episodes` virtual
             # table via beam._vec_search for fast O(log N) ANN on EM
             # when sqlite-vec is loaded. Without mirroring that path,
             # the polyphonic engine would do a linear O(N) JSON-decode
-            # + cosine over every embedded EM row — strictly slower
+            # + cosine over every embedded EM row -- strictly slower
             # than the linear scorer at benchmark scale (~250K rows).
             # That confounds the BEAM-recovery experiment's
             # polyphonic-vs-linear latency comparison.
@@ -367,7 +367,7 @@ class PolyphonicRecallEngine:
                         em_consumed_via_vec_episodes = bool(em_rows_via_vec)
             except (ImportError, AttributeError,
                     sqlite3.Error, ValueError, TypeError) as exc:
-                # Broader catch than the original tuple — partial
+                # Broader catch than the original tuple -- partial
                 # imports can surface as AttributeError, corrupt DB
                 # state as sqlite3.DatabaseError (other Error
                 # subclasses), and quantize edge cases as TypeError.
@@ -376,7 +376,7 @@ class PolyphonicRecallEngine:
                 # through to the numpy path on any of them.
                 em_consumed_via_vec_episodes = False
 
-            # --- EM tier — numpy fallback (or when sqlite-vec absent) ---
+            # --- EM tier -- numpy fallback (or when sqlite-vec absent) ---
             if not em_consumed_via_vec_episodes:
                 try:
                     em_rows = conn.execute(
@@ -427,7 +427,7 @@ class PolyphonicRecallEngine:
                     except (ValueError, TypeError, json.JSONDecodeError):
                         continue
 
-            # --- WM tier — numpy cosine (no sqlite-vec WM index today) ---
+            # --- WM tier -- numpy cosine (no sqlite-vec WM index today) ---
             # Same WHERE clause shape as beam._wm_vec_search: skip
             # invalidated / superseded rows so vector voice never
             # surfaces ghost rows the linear path would have hidden.
@@ -458,7 +458,7 @@ class PolyphonicRecallEngine:
                     if vec_norm == 0.0:
                         continue
                     cos_sim = float(np.dot(query_unit, vec / vec_norm))
-                    # Normalize cosine to [0, 1] — same rationale as EM
+                    # Normalize cosine to [0, 1] -- same rationale as EM
                     # numpy path above (cross-path dedup parity).
                     sim = (cos_sim + 1.0) / 2.0
                     existing = by_id.get(memory_id)

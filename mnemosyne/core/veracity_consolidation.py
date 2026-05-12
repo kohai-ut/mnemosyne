@@ -51,7 +51,7 @@ def compute_fact_id(subject: str, predicate: str, object: str) -> str:
     framing. Always-uniform 27 chars (`cf_` + 24 hex). Properties:
 
       - **Collision-safe across content lengths.** Hash never
-        truncates the input — long SPOs are encoded fully.
+        truncates the input -- long SPOs are encoded fully.
       - **Smuggle-safe.** Length-prefix framing (``b"3:foo4:isax"``)
         makes the encoding injective: two distinct SPO tuples can
         never produce the same byte string regardless of whether a
@@ -65,7 +65,7 @@ def compute_fact_id(subject: str, predicate: str, object: str) -> str:
         `importers/hindsight.py:144`).
 
     Two facts with the same SPO produce the same ID (idempotency
-    preserved — `consolidate_fact`'s dedup still relies on SPO
+    preserved -- `consolidate_fact`'s dedup still relies on SPO
     equality, not ID equality). Distinct facts produce distinct
     IDs regardless of content length.
 
@@ -75,7 +75,7 @@ def compute_fact_id(subject: str, predicate: str, object: str) -> str:
     matching pre-fix), so old rows are found correctly on UPDATE.
     Only newly inserted rows get the new format. Cross-format DBs
     work indefinitely. `_fact_voice` reads the stored row id
-    (via ConsolidatedFact.id) rather than recomputing — preserves
+    (via ConsolidatedFact.id) rather than recomputing -- preserves
     RRF-key alignment for legacy rows.
 
     /review history:
@@ -105,7 +105,7 @@ def compute_fact_id(subject: str, predicate: str, object: str) -> str:
             )
     # NFC normalize each component so different normalization forms
     # of the same logical text produce the same ID. Length-prefix
-    # framing makes the encoding injective — different SPO tuples
+    # framing makes the encoding injective -- different SPO tuples
     # cannot share a byte representation regardless of in-field
     # separator characters.
     parts: List[bytes] = []
@@ -196,7 +196,7 @@ def aggregate_veracity(source_veracities) -> str:
           Rationale: the column default is 'unknown', so legacy rows that
           never had veracity explicitly set store the literal 'unknown'
           string. The aggregator can't distinguish "operator marked unknown"
-          from "nobody set it" — letting 'unknown' dilute confident
+          from "nobody set it" -- letting 'unknown' dilute confident
           signals systematically deflates summaries from mixed-vintage
           sessions (review H1, 2026-05-11).
         - Within the candidates (non-'unknown' if any, else all-'unknown'):
@@ -211,7 +211,7 @@ def aggregate_veracity(source_veracities) -> str:
     sources resolve toward caution rather than overclaiming.
 
     Non-canonical labels in input (e.g., raw LLM output bleeding through
-    a caller's clamp) are silently dropped from the count — operators
+    a caller's clamp) are silently dropped from the count -- operators
     rely on `clamp_veracity()` at the trust boundary; the aggregator is
     not a clamp, it's a reducer.
 
@@ -228,7 +228,7 @@ def aggregate_veracity(source_veracities) -> str:
     valid = [v for v in source_veracities if v in VERACITY_ALLOWED]
     if not valid:
         return "unknown"
-    # H1 review fix: 'unknown' is the schema default — treat as
+    # H1 review fix: 'unknown' is the schema default -- treat as
     # low-priority so legacy rows don't dilute confident signals.
     non_unknown = [v for v in valid if v != "unknown"]
     candidates = non_unknown if non_unknown else valid
@@ -257,7 +257,7 @@ class ConsolidatedFact:
     sources: List[str]
     veracity: str
     superseded: bool = False
-    # Stored `consolidated_facts.id` — present for rows fetched from
+    # Stored `consolidated_facts.id` -- present for rows fetched from
     # the DB, None for transient ConsolidatedFact returns from
     # consolidate_fact (which carries the value but doesn't re-roundtrip
     # through this dataclass for the inserted row's id). Consumers like
@@ -307,7 +307,7 @@ class VeracityConsolidator:
         # database-level serialization across CONNECTIONS, but two threads
         # sharing the same `VeracityConsolidator` instance (and therefore
         # the same `self.conn`) would both see `conn.in_transaction = True`
-        # after the first thread's BEGIN — defeating the nested-tx skip
+        # after the first thread's BEGIN -- defeating the nested-tx skip
         # logic and recreating the race within a single SQL transaction.
         # `RLock` (not `Lock`) so the contextmanager can recursively enter
         # for nested calls within the same thread (e.g.,
@@ -377,7 +377,7 @@ class VeracityConsolidator:
         outer transaction (Python sqlite3's default implicit tx) does
         NOT acquire the writer lock until its own first INSERT/UPDATE.
         Two threads each in their own DEFERRED outer tx can both pass
-        the SELECT-no-match check before either writes — the race
+        the SELECT-no-match check before either writes -- the race
         window reopens inside the outer scope. Race safety inside a
         caller-owned outer tx requires either (a) the outer tx is
         ``BEGIN IMMEDIATE`` or ``BEGIN EXCLUSIVE``, OR (b) the caller
@@ -388,14 +388,14 @@ class VeracityConsolidator:
         we own the tx) so callers can implement retry / circuit-break
         policies.
         """
-        # Capture conn at entry — defense against the body swapping
+        # Capture conn at entry -- defense against the body swapping
         # self.conn (closing the original, reassigning, etc.). All of
         # commit/rollback/cursor must target the SAME connection we
         # opened BEGIN IMMEDIATE on. /review (Codex adversarial MED).
         conn = self.conn
         # Acquire instance lock BEFORE BEGIN IMMEDIATE so two threads
         # sharing this VeracityConsolidator instance (and therefore
-        # this conn) serialize at the Python level — SQLite's writer
+        # this conn) serialize at the Python level -- SQLite's writer
         # lock alone doesn't protect them because they share the same
         # transaction once the first thread starts one.
         with self._write_lock:
@@ -547,7 +547,7 @@ class VeracityConsolidator:
 
                 # Record conflicts. Pass `commit=False` so the helper's
                 # internal commit doesn't end our `_serialized_write`
-                # transaction mid-loop — see _record_conflict docstring
+                # transaction mid-loop -- see _record_conflict docstring
                 # for the atomicity rationale.
                 for conflict in conflicts:
                     self._record_conflict(
@@ -621,7 +621,7 @@ class VeracityConsolidator:
 
             # Already-resolved guard: first-writer-wins semantics. Pre-fix
             # serialization alone didn't fix the case where two callers
-            # passed different winning_fact_id values — even with BEGIN
+            # passed different winning_fact_id values -- even with BEGIN
             # IMMEDIATE the second call would still mark the OTHER fact
             # superseded (the conflict's read returned the same fact ids
             # both times). With the guard, the second call sees the
@@ -744,7 +744,7 @@ class VeracityConsolidator:
                 superseded=row["superseded_by"] is not None,
                 # Preserve the stored id (pre-fix legacy or post-fix
                 # hash form) so callers like polyphonic_recall._fact_voice
-                # use it for RRF keys instead of recomputing — keeps
+                # use it for RRF keys instead of recomputing -- keeps
                 # mixed-format DBs internally consistent.
                 id=row["id"],
             ))
@@ -802,7 +802,7 @@ class VeracityConsolidator:
                 """
             )
 
-            # Materialize the row list before iterating + writing —
+            # Materialize the row list before iterating + writing --
             # mixing fetch with writes on the same cursor can confuse
             # the iteration state under some sqlite3 builds.
             primary_rows = cursor.fetchall()

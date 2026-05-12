@@ -6,10 +6,10 @@ the corresponding feature when set to a falsy value (`0`/`false`/`no`/
 `docs/benchmarking.md` for the full toggle catalog.
 
 These tests pin three properties per toggle:
-  1. Default behavior (env unset) — feature ENABLED.
+  1. Default behavior (env unset) -- feature ENABLED.
   2. Falsy values disable the feature.
-  3. The disable surfaces in actual recall results (when feasible) —
-     not just an internal flag — so a future refactor that strips the
+  3. The disable surfaces in actual recall results (when feasible) --
+     not just an internal flag -- so a future refactor that strips the
      gate from the code path fails this test instead of silently
      reverting the experiment's ability to ablate.
 """
@@ -111,7 +111,7 @@ class TestPolyphonicVoiceToggles:
 
     def test_vector_voice_enabled_runs(self, engine, monkeypatch):
         """With toggle unset (default), the voice attempts to run.
-        We don't assert specific results — only that we got past the
+        We don't assert specific results -- only that we got past the
         early-return guard (returns a list, even if empty)."""
         monkeypatch.delenv("MNEMOSYNE_VOICE_VECTOR", raising=False)
         import numpy as np
@@ -162,7 +162,7 @@ class TestLinearBonusToggles:
 
     Direct assertion: with toggle OFF, the score is what hybrid scoring
     produces WITHOUT the bonus block running. We check this by
-    structural test of beam.py — the toggles short-circuit the entire
+    structural test of beam.py -- the toggles short-circuit the entire
     bonus-computation block, not just the final addition, so any rows
     that would have received a bonus get a strictly lower score.
     """
@@ -200,7 +200,7 @@ class TestLinearBonusToggles:
         """With `MNEMOSYNE_GRAPH_BONUS=0`, the graph-edge bonus block is
         skipped. We construct the same scenario twice and assert the
         scores differ by the expected bonus amount."""
-        # Run 1: default ON — score includes graph bonus.
+        # Run 1: default ON -- score includes graph bonus.
         beam = BeamMemory(session_id="s1", db_path=temp_db)
         self._seed_episodic_with_graph_data(beam)
         # Defang downstream multipliers we don't care about.
@@ -266,7 +266,7 @@ class TestLinearBonusToggles:
         src = (Path(__file__).resolve().parents[1] / "mnemosyne" / "core" / "beam.py").read_text()
         # Should be referenced in the binary_bonus gate site
         assert src.count("MNEMOSYNE_BINARY_BONUS") >= 1, (
-            "MNEMOSYNE_BINARY_BONUS gate missing from beam.py — "
+            "MNEMOSYNE_BINARY_BONUS gate missing from beam.py -- "
             "ablation toggle stripped"
         )
 
@@ -373,7 +373,7 @@ class TestCrossTierDedupToggle:
         )
         beam.conn.commit()
 
-        # Synthetic results — both should survive when dedup is off.
+        # Synthetic results -- both should survive when dedup is off.
         results = [
             {"id": "wm-src", "tier": "working", "score": 0.9, "content": "raw"},
             {"id": "ep-sum", "tier": "episodic", "score": 0.5, "content": "sum"},

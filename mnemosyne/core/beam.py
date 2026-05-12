@@ -32,14 +32,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Typed memory classification (Phase 1 — zero overhead, pattern-based)
+# Typed memory classification (Phase 1 -- zero overhead, pattern-based)
 try:
     from mnemosyne.core.typed_memory import classify_memory, MemoryType
 except ImportError:
     classify_memory = None
     MemoryType = None
 
-# Binary vector compression (Phase 2 — Moorcheh ITS)
+# Binary vector compression (Phase 2 -- Moorcheh ITS)
 try:
     from mnemosyne.core.binary_vectors import (
         BinaryVectorStore,
@@ -65,7 +65,7 @@ try:
         clamp_veracity,
         aggregate_veracity,
     )
-    # Alias used below to construct STATED_WEIGHT et al. — same dict as
+    # Alias used below to construct STATED_WEIGHT et al. -- same dict as
     # the canonical VERACITY_WEIGHTS so changes propagate.
     _VW_DEFAULTS = VERACITY_WEIGHTS
 except ImportError:
@@ -100,7 +100,7 @@ except ImportError:
     def clamp_veracity(raw, *, context: str = "veracity") -> str:
         """Fallback when veracity_consolidation is unavailable.
         Mirrors the canonical helper's API and clamps non-canonical
-        labels to 'unknown'. Does NOT log per-call warnings — the
+        labels to 'unknown'. Does NOT log per-call warnings -- the
         import-time warning above is the audit signal. Operators
         should fix the import to restore full observability.
         """
@@ -146,7 +146,7 @@ def _env_truthy(name: str) -> bool:
     (case-insensitive, whitespace-stripped). Everything else
     (including unset, empty, garbage) is False.
 
-    Complement of `_env_disabled` (defined below) — they exist for
+    Complement of `_env_disabled` (defined below) -- they exist for
     different default-state use cases. Use `_env_truthy` when the
     feature is default-OFF and an env var opts it on; use
     `_env_disabled` when the feature is default-ON and an env var
@@ -208,7 +208,7 @@ def _env_disabled(name: str) -> bool:
     Used by experiment ablation toggles where the feature is ON by
     default (production behavior) and operators can disable it
     explicitly via env var. Distinct from `_env_truthy` from the
-    benchmark harness — that one defaults to OFF, this one defaults
+    benchmark harness -- that one defaults to OFF, this one defaults
     to ON. See `docs/benchmarking.md` for the full toggle reference.
 
     Unset / empty / non-falsy → False (feature enabled).
@@ -231,7 +231,7 @@ def _env_float(name: str, default: float) -> float:
     Pre-fix `float(os.environ.get("MNEMOSYNE_STATED_WEIGHT", "1.0"))`
     raised ValueError when the env var was set to empty (`export
     MNEMOSYNE_STATED_WEIGHT=`) because `os.environ.get` returns `""`
-    (the value), not the default — `float("")` then crashed import
+    (the value), not the default -- `float("")` then crashed import
     BEFORE the C32 override-WARN could fire. Restored from PR #91
     after the merge stripped it.
     """
@@ -261,7 +261,7 @@ def _detect_veracity_weight_overrides() -> List[str]:
     """C32: return a list of `MNEMOSYNE_*_WEIGHT` env vars set to a
     non-empty value. Filters out empty-string values (`export
     MNEMOSYNE_STATED_WEIGHT=`) since `_env_float` falls back to default
-    on empties — counting them would confuse the WARN message.
+    on empties -- counting them would confuse the WARN message.
     """
     return [
         name for name in (
@@ -295,7 +295,7 @@ def _warn_about_veracity_weight_overrides(force: bool = False) -> bool:
     logger.warning(
         "Veracity weight env overrides detected: %s. Recall scoring will "
         "honor the override, but consolidation Bayesian compounding "
-        "(veracity_consolidation.VERACITY_WEIGHTS) does NOT — the two "
+        "(veracity_consolidation.VERACITY_WEIGHTS) does NOT -- the two "
         "will drift. Set matching values in veracity_consolidation.py "
         "OR accept that 'consolidated-as-N also ranks at N' invariant "
         "is broken until the consolidator is taught the same overrides.",
@@ -469,7 +469,7 @@ def init_beam(db_path: Path = None):
         cursor.execute("ALTER TABLE working_memory ADD COLUMN consolidated_at TEXT")
         _e3_column_added = True
     except sqlite3.OperationalError as exc:
-        # Only swallow "duplicate column" — every other OperationalError
+        # Only swallow "duplicate column" -- every other OperationalError
         # (database locked, disk I/O, readonly, missing table) must
         # surface so callers don't proceed with a broken schema.
         if "duplicate column" not in str(exc).lower():
@@ -479,7 +479,7 @@ def init_beam(db_path: Path = None):
         # Pre-E3 backfill: existing rows are treated as already-consolidated.
         # Without this, the first post-upgrade sleep would treat the entire
         # pre-existing backlog as "not yet consolidated" and try to summarize
-        # everything at once — including rows pre-E3 sleep would have already
+        # everything at once -- including rows pre-E3 sleep would have already
         # DELETEd. The backfill preserves the pre-E3 expectation that "old
         # rows are gone." Cost: a single UPDATE on existing rows at upgrade
         # time. Idempotent: this branch only fires when the column was just
@@ -575,7 +575,7 @@ def init_beam(db_path: Path = None):
     """)
     # The wm_au trigger restricts to UPDATE OF content so sleep's
     # consolidated_at marker writes don't churn the FTS index. Pre-E3
-    # this trigger fired on every UPDATE — fine when UPDATEs were rare;
+    # this trigger fired on every UPDATE -- fine when UPDATEs were rare;
     # post-E3 sleep marks SLEEP_BATCH_SIZE rows per cycle and would
     # otherwise generate 2*N FTS round-trips per sleep with no content
     # delta. SQLite column-list triggers handle the perf concern.
@@ -710,7 +710,7 @@ class _BeamConnection(sqlite3.Connection):
     on exception).
 
     Subclassing is required because `sqlite3.Connection.commit` is a
-    read-only C-level method — monkey-patching it raises
+    read-only C-level method -- monkey-patching it raises
     `AttributeError`. The factory= parameter on `sqlite3.connect` is
     the supported integration point.
     """
@@ -739,7 +739,7 @@ def _deferred_commits(conn: sqlite3.Connection):
     passed connection isn't a `_BeamConnection` (e.g., a test
     constructed `BeamMemory` with a raw sqlite3 connection, or a
     legacy caller built its own conn), the context manager degrades
-    to a no-op — inner commits still fire, performance regression
+    to a no-op -- inner commits still fire, performance regression
     isn't fixed for that code path but correctness is preserved.
 
     Threading: `_BeamConnection._defer_commit` is per-connection.
@@ -943,7 +943,7 @@ def _extract_and_store_entities(beam: "BeamMemory", memory_id: str, content: str
         # Reuse BeamMemory's shared AnnotationStore (cached on the beam
         # instance, shares the thread-local connection). UNIQUE constraint
         # on (memory_id, kind, value) plus INSERT OR IGNORE makes this
-        # idempotent — re-extraction on duplicate-content writes is a no-op.
+        # idempotent -- re-extraction on duplicate-content writes is a no-op.
         beam.annotations.add_many(
             memory_id=memory_id,
             kind="mentions",
@@ -989,7 +989,7 @@ def _extract_and_store_facts(beam: "BeamMemory", memory_id: str, content: str, s
                 confidence=0.7,
             )
 
-        # ALSO store in facts table (new cloud extraction path) — uses the
+        # ALSO store in facts table (new cloud extraction path) -- uses the
         # full facts list (matching pre-E6 behavior).
         _store_facts_in_table(beam, memory_id, content, source, facts)
 
@@ -1040,7 +1040,7 @@ def _find_memories_by_entity(beam: "BeamMemory", entity_name: str, threshold: fl
     Returns list of memory_id strings.
 
     Post-E6: reads from AnnotationStore. Memories with multiple mentions
-    now all surface (silent-destruction bug fixed) — the pre-E6 path
+    now all surface (silent-destruction bug fixed) -- the pre-E6 path
     against TripleStore returned only the last-written mention per memory
     because of auto-invalidation on (subject, predicate).
     """
@@ -1353,7 +1353,7 @@ class BeamMemory:
         # who want explicit control. See:
         # - mnemosyne/migrations/e6_triplestore_split.py
         # - .hermes/ledger/memory-contract.md (E6)
-        # Also ensure the legacy `triples` table exists — the post-E6
+        # Also ensure the legacy `triples` table exists -- the post-E6
         # production path no longer writes to it, but external scripts
         # (scripts/backfill_temporal_triples.py) and deprecation-period
         # callers of TripleStore still expect the table to be present.
@@ -1366,7 +1366,7 @@ class BeamMemory:
 
         # E6: shared AnnotationStore handle reusing this BeamMemory's
         # thread-local connection. Production call sites use `self.annotations`
-        # instead of constructing fresh AnnotationStore(...) per call —
+        # instead of constructing fresh AnnotationStore(...) per call --
         # eliminates the per-call file-descriptor cost the post-E6 review
         # surfaced (every extraction/recall opened 2 connections + ran DDL).
         from mnemosyne.core.annotations import AnnotationStore
@@ -1401,7 +1401,7 @@ class BeamMemory:
         Respects ``MNEMOSYNE_AUTO_MIGRATE=0`` for operators who want
         explicit control over schema migrations. When auto-migration is
         disabled and a migration would have been required, log a clear
-        warning pointing at the manual migration script — the AnnotationStore
+        warning pointing at the manual migration script -- the AnnotationStore
         schema is still created so downstream code can run, but legacy rows
         remain in the triples table until the operator runs the script.
 
@@ -1564,11 +1564,11 @@ class BeamMemory:
             extract_entities: If True, extract and store entity mentions as triples
             extract: If True, extract structured facts from content using LLM
                 and store as triples. Default False.
-            veracity: Confidence level — 'stated', 'inferred', 'tool', 'imported', 'unknown'.
+            veracity: Confidence level -- 'stated', 'inferred', 'tool', 'imported', 'unknown'.
                 Non-canonical labels are clamped to 'unknown' with a WARNING
                 (mirrors the C12.b clamp at the hermes_memory_provider boundary).
         """
-        # Clamp veracity at the BeamMemory.remember entry too — the
+        # Clamp veracity at the BeamMemory.remember entry too -- the
         # method is the lowest-level public ingest path under BeamMemory,
         # so consistency with remember_batch and the provider
         # boundary requires clamping here. Pre-E4 the column was raw;
@@ -1584,7 +1584,7 @@ class BeamMemory:
             metadata["_blob"] = blob_meta
             content = sanitized_content
 
-        # --- Typed memory classification (Phase 1 — zero overhead) ---
+        # --- Typed memory classification (Phase 1 -- zero overhead) ---
         memory_type = None
         if classify_memory is not None:
             try:
@@ -1600,7 +1600,7 @@ class BeamMemory:
             # Dedup-update clears consolidated_at so a re-remembered row
             # becomes eligible for sleep again. Without this, an already-
             # consolidated row that the user reasserts is permanently
-            # skipped — its fresher timestamp/source/scope never produces
+            # skipped -- its fresher timestamp/source/scope never produces
             # a fresh summary. Pre-E3 this scenario didn't exist because
             # consolidated rows were deleted; the additive design has to
             # opt back in.
@@ -1608,7 +1608,7 @@ class BeamMemory:
             # Without this, a row first stored as 'unknown' and later
             # re-remembered as 'stated' kept the stale 'unknown' label,
             # which E4.a.1's sleep-time aggregator then propagates into
-            # the episodic summary — defeating the trust-signal refresh.
+            # the episodic summary -- defeating the trust-signal refresh.
             # Conservative policy: only upgrade if the new call passes a
             # non-'unknown' veracity (preserves per-row trust on
             # backfills that don't carry a meaningful veracity arg).
@@ -1632,8 +1632,8 @@ class BeamMemory:
                   existing_id, self.session_id))
             self.conn.commit()
             # Run the same entity/fact extraction the new-row path runs, so
-            # backfill calls — `mem.remember(same_content, extract=True)` on
-            # an already-existing row — actually populate the triples and
+            # backfill calls -- `mem.remember(same_content, extract=True)` on
+            # an already-existing row -- actually populate the triples and
             # facts tables. Without this the dedup early-return silently
             # skips everything `extract=True` advertises, breaking the
             # contract on duplicate-content writes (see C12.a /review note).
@@ -1702,14 +1702,14 @@ class BeamMemory:
             method-level `veracity` is applied to EVERY row uniformly
             and per-item `item["veracity"]` is IGNORED (warning logged
             per item if present so the operator sees the override).
-            Use this when the caller is the authority on trust —
+            Use this when the caller is the authority on trust --
             e.g., an importer ingesting LLM-generated content that
             shouldn't be able to self-elevate its label. Pre-E4 the
             per-item override was harmless because veracity didn't
             affect ranking; post-E4 it gates a real ranking signal
             so callers consuming untrusted content need this knob.
             When False (default), per-item `veracity` keys override
-            the method default — preserves the legitimate use case
+            the method default -- preserves the legitimate use case
             of mixed-trust batches (e.g., user messages='stated',
             tool observations='tool').
 
@@ -1726,7 +1726,7 @@ class BeamMemory:
         working_memory hits too, so per-row veracity differentiates
         scores at the experiment level.
 
-        E2 — Enrichment parity with `remember()`:
+        E2 -- Enrichment parity with `remember()`:
             Post-E2 this method runs the same post-insert enrichment
             pipeline `remember()` runs unconditionally:
               - `_add_temporal_triple` writes the row's date as an
@@ -1737,11 +1737,11 @@ class BeamMemory:
                 fact extraction via `EpisodicGraph` and consolidates
                 the extracted facts into `consolidated_facts` weighted
                 by per-row veracity (`VeracityConsolidator`). Zero LLM
-                — rule-based / regex pattern matching only.
+                -- rule-based / regex pattern matching only.
 
             Without this fix any high-throughput ingest path bypassed
             the enrichment layer entirely, leaving the polyphonic
-            engine's `graph` and `fact` voices with no data to fuse —
+            engine's `graph` and `fact` voices with no data to fuse --
             E5's RRF over 4 voices collapsed to 2 voices in practice.
 
         extract_entities (default False): opt-in regex entity scan
@@ -1765,13 +1765,13 @@ class BeamMemory:
         ids = []
         # Carry per-row source + veracity through to enrichment so we
         # don't re-derive them post-insert. Keyed by memory_id rather
-        # than indexed-by-position (post-/review M4 — dict eliminates
+        # than indexed-by-position (post-/review M4 -- dict eliminates
         # the parallel-list class of refactor bug, and works under
         # python -O where the prior `assert mid_check == memory_id`
         # would have stripped).
         meta_by_id: Dict[str, Tuple[str, str]] = {}  # mid → (source, veracity)
         timestamp = datetime.now().isoformat()
-        # Clamp the method-level default once, not per row — operators
+        # Clamp the method-level default once, not per row -- operators
         # who pass a bad default should see one warning, not N.
         default_veracity = clamp_veracity(
             veracity, context="remember_batch.default"
@@ -1798,7 +1798,7 @@ class BeamMemory:
                     pass
             # Per-item override semantics gated by force_veracity. In
             # strict mode (force_veracity=True) per-item keys are
-            # ignored — the caller is the trust authority. Otherwise
+            # ignored -- the caller is the trust authority. Otherwise
             # per-item overrides the method-level default. Either way
             # the final value passes through clamp_veracity at the
             # trust boundary.
@@ -1856,14 +1856,14 @@ class BeamMemory:
                 if vectors is None:
                     logger.warning(
                         "remember_batch: _embeddings.embed returned None for "
-                        "batch of %d items — no vectors stored, vector voice "
+                        "batch of %d items -- no vectors stored, vector voice "
                         "will miss these rows",
                         len(contents),
                     )
                 elif len(vectors) != len(contents):
                     logger.warning(
                         "remember_batch: embedding count mismatch (%d vectors "
-                        "for %d inputs) — skipping vector storage for this "
+                        "for %d inputs) -- skipping vector storage for this "
                         "batch to avoid partial-alignment errors",
                         len(vectors), len(contents),
                     )
@@ -1885,7 +1885,7 @@ class BeamMemory:
                     len(items), type(exc).__name__, exc,
                 )
 
-        # E2 — enrichment parity with `remember()`. The merge of PR #82
+        # E2 -- enrichment parity with `remember()`. The merge of PR #82
         # accidentally stripped these calls during conflict resolution;
         # `_add_temporal_triple` and `_ingest_graph_and_veracity` exist
         # but were not being called per row. Without them the polyphonic
@@ -1920,7 +1920,7 @@ class BeamMemory:
                     _extract_and_store_entities(self, memory_id, row_content)
                 if extract:
                     _extract_and_store_facts(self, memory_id, row_content, item_source)
-                # MEMORY_ADDED parity with remember() — streaming
+                # MEMORY_ADDED parity with remember() -- streaming
                 # observers + DeltaSync see batch rows the same way
                 # they see single-row writes.
                 self._emit_event(
@@ -1944,7 +1944,7 @@ class BeamMemory:
     def _ingest_graph_and_veracity(self, memory_id: str, content: str,
                                     source: str, veracity: str = "unknown"):
         """Phase 3-4: Extract gists + facts, store in graph, consolidate veracity.
-        Non-blocking — failures in graph/veracity don't affect memory storage."""
+        Non-blocking -- failures in graph/veracity don't affect memory storage."""
 
         gist = None
         facts = []
@@ -1990,7 +1990,7 @@ class BeamMemory:
 
         Post-E6: writes occurred_on / has_source as annotations rather
         than triples. These are inherently single-valued per memory
-        today, but `annotations` is the correct home — they describe a
+        today, but `annotations` is the correct home -- they describe a
         memory rather than expressing a current-truth fact like
         "user prefers X". Method name kept for backward compat.
         """
@@ -2108,7 +2108,7 @@ class BeamMemory:
         last = cursor.fetchone()
         return {"total": total, "last": last[0] if last else None}
 
-    # DEPRECATED — kept for backward compatibility with hermes_memory_provider/cli.py
+    # DEPRECATED -- kept for backward compatibility with hermes_memory_provider/cli.py
     def get_global_working_stats(self) -> Dict:
         """DEPRECATED: Use get_working_stats() instead. Kept for backward compatibility."""
         return self.get_working_stats()
@@ -2141,7 +2141,7 @@ class BeamMemory:
         # session_id column, so an unconditional `DELETE FROM annotations
         # WHERE memory_id = ?` lets a hostile caller in session B pass a
         # memory_id from session A and silently wipe session A's annotations
-        # — adversarial /review found this. The session-scoped working_memory
+        # -- adversarial /review found this. The session-scoped working_memory
         # DELETE is the trust boundary: if it matches a row, the caller is
         # authorized to delete the row's annotations. If it matches zero
         # rows (wrong session, or already-forgotten), we skip the cascade.
@@ -2182,7 +2182,7 @@ class BeamMemory:
         E4.a.1: `veracity` kwarg threads the aggregated source-row veracity
         into the episodic INSERT. Pre-fix the INSERT didn't include the
         veracity column at all, so post-sleep rows took the schema default
-        'unknown' — destroying the per-row veracity signal `remember_batch`
+        'unknown' -- destroying the per-row veracity signal `remember_batch`
         had populated. Callers (typically `sleep()`) should compute the
         aggregate via `aggregate_veracity()` over the source rows' veracity
         values and pass it here. `None` falls back to 'unknown' (matches
@@ -2229,7 +2229,7 @@ class BeamMemory:
                         VALUES (?, ?, ?)
                     """, (memory_id, _embeddings.serialize(vec[0]), _embeddings._DEFAULT_MODEL))
 
-                # Binary vector compression (Phase 2 — 32x reduction)
+                # Binary vector compression (Phase 2 -- 32x reduction)
                 if _mib is not None:
                     try:
                         bv = _mib(vec[0])
@@ -2248,7 +2248,7 @@ class BeamMemory:
         # facts uses the source-aggregated signal, not a hardcoded
         # 'inferred'. Pre-fix this line passed 'inferred' regardless, which
         # the consolidator's `consolidate_fact` then used as the veracity
-        # weight in its confidence update — undermining the very signal
+        # weight in its confidence update -- undermining the very signal
         # we just preserved in the episodic INSERT.
         self._ingest_graph_and_veracity(memory_id, summary, source, veracity=row_veracity)
 
@@ -2313,8 +2313,8 @@ class BeamMemory:
         Polyphonic recall (E5, gated by MNEMOSYNE_POLYPHONIC_RECALL=1):
             When the env flag is set to "1", recall delegates to
             PolyphonicRecallEngine (mnemosyne/core/polyphonic_recall.py).
-            The engine runs 4 voices in parallel — vector / graph /
-            fact / temporal — fuses them via RRF (k=60), diversity-
+            The engine runs 4 voices in parallel -- vector / graph /
+            fact / temporal -- fuses them via RRF (k=60), diversity-
             reranks the combined results, and assembles within a
             context budget. Each result dict carries `voice_scores`
             for per-signal provenance.
@@ -2322,7 +2322,7 @@ class BeamMemory:
             Flag unset or "0" (default): the existing linear scorer
             below runs unchanged. Zero behavior change for production.
         """
-        # E5 feature flag — read per call so operators can toggle
+        # E5 feature flag -- read per call so operators can toggle
         # without rebuilding BeamMemory (critical for A/B experiments
         # in the same process). All recall filter kwargs flow through
         # so the engine path enforces the same isolation/validity
@@ -2352,7 +2352,7 @@ class BeamMemory:
         else:
             th_halflife = float(os.environ.get("MNEMOSYNE_TEMPORAL_HALFLIFE_HOURS", "24"))
 
-        # [C4] Recall path diagnostics — lazy import to avoid module-
+        # [C4] Recall path diagnostics -- lazy import to avoid module-
         # load coupling. Counters are recorded AFTER the per-row
         # scoring loops below so they reflect POST-FILTER kept rows
         # (not pre-filter candidate sets). /review caught the
@@ -2401,7 +2401,7 @@ class BeamMemory:
             _wm_had_candidates = True
         # If both FTS and vec produced nothing, the WM fallback at
         # the else-branch below fires. Recording the fallback signal
-        # uses a boolean (per-call), not a per-row count — that
+        # uses a boolean (per-call), not a per-row count -- that
         # avoids double-counting against the kept-row accumulators.
         _wm_fallback_used = not wm_ids
         if _wm_fallback_used:
@@ -2853,7 +2853,7 @@ class BeamMemory:
         # [C4] em_fts/em_vec kept counts are accumulated per-row
         # inside the scoring loop below so the counters reflect
         # post-filter results, not pre-filter candidate sets.
-        # /review caught the pre-filter recording as misleading —
+        # /review caught the pre-filter recording as misleading --
         # rows that pass FTS but get dropped by wm_where/em_where
         # (session/channel/date) inflated the counter.
         
@@ -2926,7 +2926,7 @@ class BeamMemory:
             # Phase 5: Graph + fact voices (polyphonic recall bonus).
             # Each block gated by an A/B toggle: `MNEMOSYNE_GRAPH_BONUS=0`,
             # `MNEMOSYNE_FACT_BONUS=0`, `MNEMOSYNE_BINARY_BONUS=0` to
-            # disable individually for ablation. Default ON — production
+            # disable individually for ablation. Default ON -- production
             # behavior unchanged.
             graph_bonus = 0.0
             fact_bonus = 0.0
@@ -2961,7 +2961,7 @@ class BeamMemory:
                     fact_bonus = min(match_count * 0.04, 0.1)
                 except Exception:
                     pass
-            # Binary vector voice (Phase 5): re-enabled — binary vectors are now
+            # Binary vector voice (Phase 5): re-enabled -- binary vectors are now
             # backfilled for all episodic entries. ITS discriminability improves at
             # scale (1033 entries); clustering concern was for small synthetic sets.
             if query_bv is not None and bv is not None and not _env_disabled("MNEMOSYNE_BINARY_BONUS"):
@@ -3096,7 +3096,7 @@ class BeamMemory:
                             fact_b = min(mc * 0.04, 0.1)
                         except Exception:
                             pass
-                    # Binary vector bonus disabled (same reason as main path — ITS clustering)
+                    # Binary vector bonus disabled (same reason as main path -- ITS clustering)
                     binary_b = 0.0
                     score += graph_b + fact_b + binary_b
                     # Temporal boost (Phase 3)
@@ -3114,13 +3114,13 @@ class BeamMemory:
                         "score": round(score, 4),
                         "keyword_score": round(relevance, 4),
                         # C30: dense_score is 0.0 by design for EM
-                        # fallback rows — they reach this loop precisely
+                        # fallback rows -- they reach this loop precisely
                         # because the vec/FTS-driven episodic path
                         # produced no candidates (no `sim` is computed
                         # here). Pre-fix this line looked up
                         # `wm_vec_sims[row["id"]]` which always returned
                         # 0.0 since `row["id"]` is an episodic id, not
-                        # a working-memory id — same numeric value,
+                        # a working-memory id -- same numeric value,
                         # misleading provenance. Now explicit.
                         "dense_score": 0.0,
                         "fts_score": 0.0,
@@ -3174,7 +3174,7 @@ class BeamMemory:
         # [E4] Apply the veracity multiplier to working_memory results
         # too. Pre-E4 the multiplier was episodic-only, so per-row
         # veracity on working_memory rows (now populated by
-        # remember_batch with per-row labels) had no scoring effect —
+        # remember_batch with per-row labels) had no scoring effect --
         # batch-ingested 'stated' content didn't rank above 'unknown'.
         # The row dicts already carry "veracity" from the SELECT
         # populated earlier in this function, so no second query needed.
@@ -3191,7 +3191,7 @@ class BeamMemory:
         # `voice_scores` dict so downstream analysis can treat linear
         # + polyphonic results uniformly when computing per-signal
         # contributions across arms. The polyphonic engine sets the
-        # same field at beam.py:~3544 — same contract, different keys
+        # same field at beam.py:~3544 -- same contract, different keys
         # because the engines have different signal sources.
         for r in results:
             r.setdefault("voice_scores", {
@@ -3255,7 +3255,7 @@ class BeamMemory:
         # number of kept rows attributed to that tier on this call.
         # Summing across tiers gives total kept rows for the call.
         # `truly_empty` is gated on whether ANY layer (primary OR
-        # fallback) produced candidates — distinct from "final
+        # fallback) produced candidates -- distinct from "final
         # results empty after top_k slicing / post-filter dropouts."
         _recall_diag.record_tier_hits("wm_fts", _wm_fts_kept)
         _recall_diag.record_tier_hits("wm_vec", _wm_vec_kept)
@@ -3268,7 +3268,7 @@ class BeamMemory:
         # tier counted hits but they got filtered) from "no signal
         # anywhere" (zero kept across all tiers). top_k=0 callers
         # also land here, but that's an artifact of the caller's
-        # choice, not a recall failure — operators wanting to
+        # choice, not a recall failure -- operators wanting to
         # exclude artifact cases can check top_k > 0 from their
         # side.
         _total_kept = (
@@ -3294,7 +3294,7 @@ class BeamMemory:
         (additive sleep), sources survive alongside summaries by design.
         A recall whose query matches both raw and summary text ranks them
         side-by-side AND compounds `recall_count` twice for the same
-        logical fact — the row's history boost double-counts on every call.
+        logical fact -- the row's history boost double-counts on every call.
 
         Dedup rule (per-cluster, not per-edge):
           - For each episodic row with non-empty `summary_of`, collect the
@@ -3302,7 +3302,7 @@ class BeamMemory:
           - If the ep's score is >= the score of EVERY covered wm in
             results, drop those wms and keep the ep (summary wins the
             whole cluster).
-          - Otherwise — some covered wm beats the ep — drop the ep and
+          - Otherwise -- some covered wm beats the ep -- drop the ep and
             keep all covered wms (sources win; the dropped ep no longer
             represents those wms in the result set).
 
@@ -3310,7 +3310,7 @@ class BeamMemory:
         lose to a summary that itself was being dropped by a different
         wm. Example fixed by this shape: ep covers wm-1 (0.9) + wm-2 (0.3)
         with ep at 0.6. Per-edge would drop ep (lost to wm-1) AND wm-2
-        (lost to ep) — but wm-2's representative ep is itself gone, so
+        (lost to ep) -- but wm-2's representative ep is itself gone, so
         wm-2 was being dropped against a phantom. Per-cluster correctly
         keeps both wms.
 
@@ -3328,7 +3328,7 @@ class BeamMemory:
             results: scored row dicts; each carries `id`, `tier`, `score`.
             ep_summary_of_map: optional precomputed `{ep_id: summary_of_str}`
                 from a caller that already SELECT-ed `episodic_memory`
-                rows. When provided, skips the helper's own SELECT — keeps
+                rows. When provided, skips the helper's own SELECT -- keeps
                 a single source of truth and avoids one round-trip per
                 recall on paths that have already fetched the data.
 
@@ -3518,7 +3518,7 @@ class BeamMemory:
 
         Filters from the caller (session/scope/valid_until/superseded/
         author/channel/source/veracity/memory_type/from_date/to_date)
-        are applied during row fetch — same isolation contract as the
+        are applied during row fetch -- same isolation contract as the
         linear path. /review caught the original implementation
         bypassing these (data-isolation regression, P1).
 
@@ -3583,7 +3583,7 @@ class BeamMemory:
             # signal or tier degradation. Veracity multiplier applies
             # to both tiers (matching the post-E4 linear behavior).
             # A/B toggle: `MNEMOSYNE_VERACITY_MULTIPLIER=0` disables
-            # veracity scaling here too — mirroring the linear path so
+            # veracity scaling here too -- mirroring the linear path so
             # both arms ablate identically.
             score = r.combined_score
             row_veracity = row_dict.get("veracity") or "unknown"
@@ -3605,7 +3605,7 @@ class BeamMemory:
         # Re-sort post-multiplier composition so the final order reflects
         # both RRF and the veracity/tier weights.
         final.sort(key=lambda x: x["score"], reverse=True)
-        # E3.a.3: apply identical cross-tier dedup as the linear path —
+        # E3.a.3: apply identical cross-tier dedup as the linear path --
         # keeps experiment Arm A vs Arm B comparison apples-to-apples
         # rather than relying on the diversity rerank to handle
         # summary↔source duplicates implicitly.
@@ -3638,7 +3638,7 @@ class BeamMemory:
                 return []
             return [self.session_id]
 
-        # Update recall_count / last_recalled for engine results too —
+        # Update recall_count / last_recalled for engine results too --
         # the linear path updates them and downstream features (decay
         # scheduling, importance reinforcement) depend on the signal.
         # /review caught the missing update as a silent telemetry loss.
@@ -3704,7 +3704,7 @@ class BeamMemory:
         # both working_memory (session_id = self.session_id OR scope =
         # 'global') and episodic_memory (same shape).
         row_session = row_dict.get("session_id") if "session_id" in row_dict else None
-        # Some rows don't carry session_id in the engine row dict — re-fetch
+        # Some rows don't carry session_id in the engine row dict -- re-fetch
         # via the cursor to enforce. For now, treat global scope as
         # always-visible and same-session as visible.
         row_scope = row_dict.get("scope") or "session"
@@ -3774,7 +3774,7 @@ class BeamMemory:
     def _polyphonic_row_to_dict(self, row, *, tier_label: str) -> Dict:
         """Shared row → recall-dict mapper. /review caught the
         near-duplicate column mapping across episodic/working
-        branches — single helper now."""
+        branches -- single helper now."""
         d = {
             "id": row["id"],
             "content": row["content"],
@@ -3858,7 +3858,7 @@ class BeamMemory:
             # sqlite3.Row supports bracket access but not .get(); convert to
             # dict so the column-with-default reads below work. Without this
             # conversion fact_recall crashes the moment the facts table
-            # contains rows — a latent bug that was masked while the
+            # contains rows -- a latent bug that was masked while the
             # Mnemosyne.remember(extract=True) wrapper never populated the
             # table (see C12.a).
             row = dict(raw_row)
@@ -3954,7 +3954,7 @@ class BeamMemory:
         # Split into sentences
         sentences = re.split(r'(?<=[.!?])\s+', content)
         if len(sentences) <= 1:
-            # No sentence boundaries — take first max_chars
+            # No sentence boundaries -- take first max_chars
             return content[:max_chars] + " [...]"
 
         # Scoring patterns
@@ -4052,7 +4052,7 @@ class BeamMemory:
         # Provider unavailable (or embed() returned None). Invalidate the
         # stale entries so dense recall doesn't lie. The row keeps its
         # FTS-searchable content and remains otherwise intact. Each DELETE
-        # is gated on the matching store's availability — vec_episodes is
+        # is gated on the matching store's availability -- vec_episodes is
         # a sqlite-vec virtual table that doesn't exist when the extension
         # isn't loaded, so an unconditional DELETE there raises
         # OperationalError and the caller's broad except would silently
@@ -4116,7 +4116,7 @@ class BeamMemory:
         # a refresh failure rolls back the content mutation too. Without
         # this the broad except below would swallow the refresh exception
         # while leaving the UPDATE staged in the implicit transaction,
-        # which then commits at the end of degrade_episodic — producing
+        # which then commits at the end of degrade_episodic -- producing
         # the very content/embedding drift this fix exists to prevent
         # (caught by /review for C18.b).
         from mnemosyne.core import local_llm
@@ -4181,7 +4181,7 @@ class BeamMemory:
         """Return potentially contaminated memories for review.
 
         Contaminated = veracity in ('inferred', 'tool', 'imported', 'unknown')
-        — i.e., anything not explicitly stated by the user. Sorted by
+        -- i.e., anything not explicitly stated by the user. Sorted by
         importance descending so the highest-stakes items surface first.
 
         Args:
@@ -4227,7 +4227,7 @@ class BeamMemory:
         # COALESCE(session_id, 'default') so a "default"-session beam also
         # consolidates rows with literal NULL session_id (which can land
         # via imports or schema migrations). Without the COALESCE these
-        # NULL-session rows are stranded — sleep_all_sessions's GROUP BY
+        # NULL-session rows are stranded -- sleep_all_sessions's GROUP BY
         # collects them as a NULL group, maps to "default" for the loop,
         # then beam.sleep("default") would query session_id = 'default'
         # and miss the NULL rows. See Codex /review note for C9.
@@ -4251,14 +4251,14 @@ class BeamMemory:
         # Atomic claim: mark rows consolidated_at BEFORE writing the
         # episodic summary, gated on consolidated_at IS STILL NULL.
         # This serves two roles at once:
-        # (1) concurrent sleep() callers — a second process that also
+        # (1) concurrent sleep() callers -- a second process that also
         #     SELECTed the same rows finds rowcount=0 on its claim and
         #     bails before producing a duplicate summary
-        # (2) crash safety — if the process dies after the claim but
+        # (2) crash safety -- if the process dies after the claim but
         #     before episodic INSERT, the next sleep cycle finds
         #     consolidated_at set and skips them rather than producing
         #     a duplicate. The flip side is a possible orphan claim
-        #     (marker set, no summary) — acceptable; the originals
+        #     (marker set, no summary) -- acceptable; the originals
         #     remain recallable and a manual "reclaim" can clear
         #     consolidated_at if needed.
         # The dry_run branch skips the claim entirely so it stays
@@ -4367,7 +4367,7 @@ class BeamMemory:
             if not dry_run:
                 # Originals are already claimed (consolidated_at set above).
                 # Just write the summary. If consolidate_to_episodic raises
-                # the claim survives — the rows show as consolidated but
+                # the claim survives -- the rows show as consolidated but
                 # without a summary. That's preferable to a phantom-summary-
                 # without-claim race the previous ordering allowed.
                 self.consolidate_to_episodic(
@@ -4459,7 +4459,7 @@ class BeamMemory:
                 # (e.g. a maintenance bot can audit-recall its own work).
                 #
                 # channel_id is intentionally NOT propagated. BeamMemory.__init__
-                # defaults channel_id to its own session_id when None — passing
+                # defaults channel_id to its own session_id when None -- passing
                 # self.channel_id (which may itself be the caller's defaulted
                 # session_id) would tag alien rows with the caller's channel,
                 # creating cross-session pollution where filter by
@@ -4533,7 +4533,7 @@ class BeamMemory:
         }
 
         # Working memory (all sessions). veracity is now part of the
-        # row's recall-scoring identity (post-E4 — the multiplier
+        # row's recall-scoring identity (post-E4 -- the multiplier
         # applies to working_memory hits), so it must survive
         # backup/restore. Without it, restored rows collapse to
         # 'unknown' and lose their per-row trust signal.
@@ -4648,7 +4648,7 @@ class BeamMemory:
                 item.get("superseded_by"), item.get("scope", "session"),
                 item.get("recall_count", 0), item.get("last_recalled"), item.get("created_at"),
                 item.get("veracity"),
-                # consolidated_at: pre-E3 exports (no key) get NULL —
+                # consolidated_at: pre-E3 exports (no key) get NULL --
                 # treated as "not yet consolidated" so the next sleep
                 # cycle on the importing DB processes them normally.
                 item.get("consolidated_at"),
@@ -4695,7 +4695,7 @@ class BeamMemory:
                     except sqlite3.Error as cleanup_exc:
                         # Broad sqlite3.Error catch (covers
                         # OperationalError, DatabaseError,
-                        # NotSupportedError, etc.) — `working_memory`
+                        # NotSupportedError, etc.) -- `working_memory`
                         # was already committed at line 3978, so
                         # propagating a non-OperationalError mid-loop
                         # would leave partial state. Best-effort

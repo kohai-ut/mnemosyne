@@ -1,6 +1,6 @@
 # Benchmarking and Testing Infrastructure
 
-**Audience:** maintainers and contributors running benchmarks against the Mnemosyne recall stack. This is not part of the normal user-facing setup — see [getting-started.md](getting-started.md) and [configuration.md](configuration.md) for those.
+**Audience:** maintainers and contributors running benchmarks against the Mnemosyne recall stack. This is not part of the normal user-facing setup -- see [getting-started.md](getting-started.md) and [configuration.md](configuration.md) for those.
 
 This document is the single source of truth for the levers that affect benchmark results: env vars, recall modes, diagnostic instrumentation, and the methodology for running rigorous A/B tests. It exists because Mnemosyne has multiple recall paths (linear + polyphonic), per-tool toggles, and harness modes that aren't relevant to normal usage but matter a great deal when measuring per-component contribution to scores.
 
@@ -8,12 +8,12 @@ This document is the single source of truth for the levers that affect benchmark
 
 ## Why a separate doc
 
-Past benchmark results (see [beam-benchmark.md](beam-benchmark.md)) were collected before several silent-failure surfaces were closed (May 2026, PRs #80–#91). Those results are not credible evidence for any specific tool's contribution to total score, because the prior pipeline had:
+Past benchmark results (see [beam-benchmark.md](beam-benchmark.md)) were collected before several silent-failure surfaces were closed (May 2026, PRs #80-#91). Those results are not credible evidence for any specific tool's contribution to total score, because the prior pipeline had:
 
 - Harness-side oracles that answered TR/CR/IE/KU questions without going through `BeamMemory.recall()` (PR #90).
-- Last 12 raw conversation messages always prepended to every answer prompt — recency-anchored answers succeeded regardless of recall quality (PR #90).
+- Last 12 raw conversation messages always prepended to every answer prompt -- recency-anchored answers succeeded regardless of recall quality (PR #90).
 - Cross-tier `(summary, source)` duplicates ranked side-by-side under the linear scorer but collapsed under polyphonic's diversity rerank, confounding arm-vs-arm comparison (PR #88).
-- Veracity destroyed at consolidation — every post-`sleep()` episodic row scored at the 0.8 `unknown` multiplier regardless of source-row veracity (PR #89).
+- Veracity destroyed at consolidation -- every post-`sleep()` episodic row scored at the 0.8 `unknown` multiplier regardless of source-row veracity (PR #89).
 - `remember_batch` silently swallowing partial embedding failures, biasing the vector voice toward early-ingested rows (PR #89).
 - Benchmark adapter writing template summaries and destroying source rows; the corpus recall actually saw was ~500 rows of "Batch N: …" stubs (PR #75 → E1).
 
@@ -29,10 +29,10 @@ These prerequisites are benchmark-only. They are **not** required to run Mnemosy
 
 ```bash
 # Already in pyproject as optional groups:
-pip install 'mnemosyne-memory[embeddings]'    # fastembed — vector voice + dense recall
-pip install 'mnemosyne-memory[llm]'           # llama-cpp-python — sleep summarization (else AAAK fallback)
+pip install 'mnemosyne-memory[embeddings]'    # fastembed -- vector voice + dense recall
+pip install 'mnemosyne-memory[llm]'           # llama-cpp-python -- sleep summarization (else AAAK fallback)
 
-# Benchmark-only — NOT in pyproject:
+# Benchmark-only -- NOT in pyproject:
 pip install datasets                           # HuggingFace BEAM dataset loader
 pip install sqlite-vec                         # ANN backend for vec_episodes virtual table
 pip install numpy                              # benchmark harness requires it unconditionally
@@ -53,10 +53,10 @@ The benchmark harness (`tools/evaluate_beam_end_to_end.py`) imports `numpy` and 
 
 | Resource | 100K scale (3 conversations) | 250K scale (3 conversations) |
 |---|---|---|
-| Wall clock | ~20–30 min | ~60–90 min |
-| Peak RSS | ~2–4 GB | ~4–8 GB |
-| Disk for DB | ~500 MB | ~2–4 GB |
-| LLM API spend | ~$0.50–$2 | ~$5–$15 |
+| Wall clock | ~20-30 min | ~60-90 min |
+| Peak RSS | ~2-4 GB | ~4-8 GB |
+| Disk for DB | ~500 MB | ~2-4 GB |
+| LLM API spend | ~$0.50-$2 | ~$5-$15 |
 
 API spend is dominated by per-question answer LLM calls. Caching identical queries can lower this; quantify on the first phase before committing to a long run.
 
@@ -79,7 +79,7 @@ Both parsers accept `1`/`true`/`yes`/`on` (case-insensitive, whitespace-stripped
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MNEMOSYNE_POLYPHONIC_RECALL` | unset (`0`) | When truthy, routes `BeamMemory.recall()` through `PolyphonicRecallEngine` (RRF fusion across vector / graph / fact / temporal voices + diversity rerank). When unset, uses the linear scorer with inline `graph_bonus` / `fact_bonus` / `binary_bonus` terms. Read at recall time, not init time — can be toggled per-call by changing the env. |
+| `MNEMOSYNE_POLYPHONIC_RECALL` | unset (`0`) | When truthy, routes `BeamMemory.recall()` through `PolyphonicRecallEngine` (RRF fusion across vector / graph / fact / temporal voices + diversity rerank). When unset, uses the linear scorer with inline `graph_bonus` / `fact_bonus` / `binary_bonus` terms. Read at recall time, not init time -- can be toggled per-call by changing the env. |
 
 **Linear vs polyphonic implement related signals via DIFFERENT mechanisms.** The linear path's `graph_bonus` is an edge-count LIKE-match on `graph_edges`. The polyphonic engine's `_graph_voice` does entity extraction + `find_facts_by_subject`. They have different failure modes; do not assume an ablation on one engine carries over to the other.
 
@@ -92,7 +92,7 @@ Both parsers accept `1`/`true`/`yes`/`on` (case-insensitive, whitespace-stripped
 | `MNEMOSYNE_IMPORTANCE_WEIGHT` | `0.1` | Weight of stored `importance` in the linear hybrid score. |
 | `MNEMOSYNE_TEMPORAL_HALFLIFE_HOURS` | (caller arg) | Temporal-boost half-life for the linear path's `_temporal_boost`. Only active when caller passes `temporal_weight > 0`. |
 
-These three (`VEC` / `FTS` / `IMPORTANCE`) interact — changing one alters the relative weight of the others. Treat as a triple to pin together.
+These three (`VEC` / `FTS` / `IMPORTANCE`) interact -- changing one alters the relative weight of the others. Treat as a triple to pin together.
 
 ### Veracity multipliers
 
@@ -106,13 +106,13 @@ Applied in both linear (post-FTS+vec scoring) and polyphonic (post-RRF) paths. A
 | `MNEMOSYNE_IMPORTED_WEIGHT` | `0.6` | Multiplier for `veracity='imported'` |
 | `MNEMOSYNE_UNKNOWN_WEIGHT` | `0.8` | Multiplier for `veracity='unknown'` (the schema default) |
 
-**Drift caveat:** these env vars override the recall multiplier in `beam.py`, but the consolidator's Bayesian compounding in `veracity_consolidation.py` does NOT honor env overrides — it reads `VERACITY_WEIGHTS` directly. Setting `MNEMOSYNE_STATED_WEIGHT=0.9` breaks the invariant "consolidated-as-N also ranks at N." `beam.py` module-load emits a single WARNING when any of these env vars are set, surfacing the drift risk.
+**Drift caveat:** these env vars override the recall multiplier in `beam.py`, but the consolidator's Bayesian compounding in `veracity_consolidation.py` does NOT honor env overrides -- it reads `VERACITY_WEIGHTS` directly. Setting `MNEMOSYNE_STATED_WEIGHT=0.9` breaks the invariant "consolidated-as-N also ranks at N." `beam.py` module-load emits a single WARNING when any of these env vars are set, surfacing the drift risk.
 
-If you want to disable the multiplier entirely for an A/B baseline, set `MNEMOSYNE_VERACITY_MULTIPLIER=0` — see [A/B ablation toggles](#ab-ablation-toggles).
+If you want to disable the multiplier entirely for an A/B baseline, set `MNEMOSYNE_VERACITY_MULTIPLIER=0` -- see [A/B ablation toggles](#ab-ablation-toggles).
 
 ### Episodic tier degradation
 
-Applied to episodic results based on their `tier` column (1, 2, 3 — set by `degrade_episodic`).
+Applied to episodic results based on their `tier` column (1, 2, 3 -- set by `degrade_episodic`).
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -136,7 +136,7 @@ For benchmark runs on synthetic short-time-span data, tier degradation typically
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MNEMOSYNE_BEAM_OPTIMIZATIONS` | unset (`0`) | When truthy, switches FTS5 to OR-semantics, raises vector-scan limit, and always includes vector results. Designed for benchmark-scale recall over large corpora. Distinct from `MNEMOSYNE_BENCHMARK_PURE_RECALL` — the latter is harness-side, this is recall-side. |
+| `MNEMOSYNE_BEAM_OPTIMIZATIONS` | unset (`0`) | When truthy, switches FTS5 to OR-semantics, raises vector-scan limit, and always includes vector results. Designed for benchmark-scale recall over large corpora. Distinct from `MNEMOSYNE_BENCHMARK_PURE_RECALL` -- the latter is harness-side, this is recall-side. |
 
 If you don't enable this for benchmarks ≥100K, expect FTS-driven recall to miss substring partial matches that the benchmark questions expect.
 
@@ -154,12 +154,12 @@ If you don't enable this for benchmarks ≥100K, expect FTS-driven recall to mis
 
 `MNEMOSYNE_BENCHMARK_PURE_RECALL=1` (or `--pure-recall`) is the single most important flag for any A/B benchmark. It disables four hardcoded paths in the harness that produce answers *without* going through `BeamMemory.recall()`:
 
-1. **TR (Temporal Reasoning) oracle** — pre-fix, TR questions extracted a timeline from raw `conversation_messages` and answered via an LLM-with-dates prompt, returning before any recall. Pure-recall lets TR questions flow through normal recall.
-2. **CR (Contradiction Resolution) injection** — pre-fix, raw-message contradiction detection injected a "you mentioned contradictory things" hint into the answer prompt. Pure-recall disables this hint; the arm must surface the contradiction via recall.
-3. **IE/KU `_context_facts` side-index** — pre-fix, the harness built a regex-keyed phrase-to-value index at ingest from raw messages, then matched questions against it and returned the value directly. Pure-recall disables the lookup.
-4. **"RECENT CONVERSATION" injection** — pre-fix, the last 12 raw conversation messages were always prepended to every answer prompt. Recency-anchored answers succeeded regardless of recall quality. Pure-recall strips the section; only retrieved memories reach the LLM.
+1. **TR (Temporal Reasoning) oracle** -- pre-fix, TR questions extracted a timeline from raw `conversation_messages` and answered via an LLM-with-dates prompt, returning before any recall. Pure-recall lets TR questions flow through normal recall.
+2. **CR (Contradiction Resolution) injection** -- pre-fix, raw-message contradiction detection injected a "you mentioned contradictory things" hint into the answer prompt. Pure-recall disables this hint; the arm must surface the contradiction via recall.
+3. **IE/KU `_context_facts` side-index** -- pre-fix, the harness built a regex-keyed phrase-to-value index at ingest from raw messages, then matched questions against it and returned the value directly. Pure-recall disables the lookup.
+4. **"RECENT CONVERSATION" injection** -- pre-fix, the last 12 raw conversation messages were always prepended to every answer prompt. Recency-anchored answers succeeded regardless of recall quality. Pure-recall strips the section; only retrieved memories reach the LLM.
 
-Without these gates, any "Arm B beats Arm A by 5pp" claim is suspect — the harness might have produced identical answers across arms for the questions hitting the bypass paths.
+Without these gates, any "Arm B beats Arm A by 5pp" claim is suspect -- the harness might have produced identical answers across arms for the questions hitting the bypass paths.
 
 The flag was added in May 2026. Default behavior (env unset) preserves the legacy benchmark mode for backward compatibility, but new runs targeting per-tool A/B claims should always set it.
 
@@ -192,7 +192,7 @@ from mnemosyne.core.recall_diagnostics import (
 | `truly_empty_calls` | Calls where every tier produced zero kept rows |
 | `fallback_rate` | `(wm_fallback + em_fallback) / total_kept` |
 
-High `fallback_rate` (>30%) on a benchmark run is a red flag — it means most recall is coming from the weak-signal substring scan, not FTS or vector. Investigate before trusting the score.
+High `fallback_rate` (>30%) on a benchmark run is a red flag -- it means most recall is coming from the weak-signal substring scan, not FTS or vector. Investigate before trusting the score.
 
 Call `reset_recall_diagnostics()` at the start of each phase to keep counters clean per-run.
 
@@ -210,8 +210,8 @@ Returns per-tier (host / remote / local / cloud / wrapper) extraction call count
 
 The general shape of a credible A/B benchmark:
 
-1. **Preflight** — assert pure-recall is active, snapshot every `MNEMOSYNE_*` env var, log recall path per call.
-2. **Phase 0 (baseline floor)** — minimum configuration: linear scorer, all veracity weights = 1.0, no enrichment.
+1. **Preflight** -- assert pure-recall is active, snapshot every `MNEMOSYNE_*` env var, log recall path per call.
+2. **Phase 0 (baseline floor)** -- minimum configuration: linear scorer, all veracity weights = 1.0, no enrichment.
 3. **+ one variable** per subsequent phase. Run on a 100K-message slice (~20 min); save full 250K runs for confirming the top two configurations from the small-scale screen.
 4. **Record** per-question paired outcomes plus the diagnostic snapshots. Compute bootstrap CIs on per-ability score deltas.
 5. **Falsification criterion:** for "tool X contributes near-zero" claims, the 95% CI must exclude ±2pp before treating the prediction as confirmed.
@@ -238,12 +238,12 @@ For the **output-file schemas, analysis recipes (paired bootstrap CIs, per-voice
 
 Capture into `results/beam_e2e_results.json` (or equivalent):
 
-- **Per-ability score** — TR / CR / IE / KU / MR / ABS / EO / SUM, plus total.
-- **Run config** — phase name, sample size, scale, all `MNEMOSYNE_*` + `FULL_CONTEXT_MODE` env vars at start.
-- **Recall diagnostics** — full `get_recall_diagnostics()` snapshot at run end (or aggregated per-call).
-- **Extraction diagnostics** — full `get_extraction_stats()` snapshot.
-- **Latency** — p50 / p95 / p99 per-question recall + answer roundtrip.
-- **Storage** — final row counts in `working_memory`, `episodic_memory`, `memory_embeddings`, `vec_episodes`, `annotations`, `consolidated_facts`.
+- **Per-ability score** -- TR / CR / IE / KU / MR / ABS / EO / SUM, plus total.
+- **Run config** -- phase name, sample size, scale, all `MNEMOSYNE_*` + `FULL_CONTEXT_MODE` env vars at start.
+- **Recall diagnostics** -- full `get_recall_diagnostics()` snapshot at run end (or aggregated per-call).
+- **Extraction diagnostics** -- full `get_extraction_stats()` snapshot.
+- **Latency** -- p50 / p95 / p99 per-question recall + answer roundtrip.
+- **Storage** -- final row counts in `working_memory`, `episodic_memory`, `memory_embeddings`, `vec_episodes`, `annotations`, `consolidated_facts`.
 - **Peak RSS** during ingest and recall phases separately.
 
 For statistical reporting, the harness emits a flat `paired_outcomes.jsonl` alongside `beam_e2e_results.json`. Each row carries `{config_id, run_started_at, scale, conversation_id, qid, ability, score, correct}`. `config_id` is either supplied via `--config-id` (recommended for human-readable phase labels like `phase3a-no-fact-voice`) or auto-derived as a SHA-256 hash of the `MNEMOSYNE_*` env snapshot. `correct` is `score >= 0.5` (treating partial-credit as correct; analyst can re-threshold off raw `score`).
@@ -256,7 +256,7 @@ Append-only: multiple A/B-phase runs accumulate in one file. Filter by `config_i
 
 ## A/B ablation toggles
 
-Nine env-var toggles allow disabling specific components for experimental ablation. **Each defaults to ON** (production behavior preserved); set the env var to `0`/`false`/`no`/`off` (case-insensitive, whitespace-stripped) to disable. Truthy/garbage/unset values keep the feature enabled — these are opt-out flags, not opt-in.
+Nine env-var toggles allow disabling specific components for experimental ablation. **Each defaults to ON** (production behavior preserved); set the env var to `0`/`false`/`no`/`off` (case-insensitive, whitespace-stripped) to disable. Truthy/garbage/unset values keep the feature enabled -- these are opt-out flags, not opt-in.
 
 The toggle helper is `mnemosyne.core.beam._env_disabled(name)` (and a mirror in `polyphonic_recall.py`). For the experiment plan's phase-by-phase usage of each toggle, see [`experiments/2026-05-12-beam-recovery-arms-abc.md`](experiments/2026-05-12-beam-recovery-arms-abc.md).
 
@@ -291,5 +291,5 @@ Pin each toggle in your `.env` or shell environment across an A/B run. The harne
 When a new env var is added that affects recall ranking or benchmark behavior, update the [Environment variable reference](#environment-variable-reference) table here. When a new diagnostic counter ships, add it to [Diagnostic instrumentation](#diagnostic-instrumentation). When a new experiment runs, add a dated artifact under `docs/experiments/`.
 
 Past experiment artifacts:
-- [2026-05-12 — BEAM-recovery Arms A/B/C](experiments/2026-05-12-beam-recovery-arms-abc.md)
-- (older runs documented in [beam-benchmark.md](beam-benchmark.md) — note that those pre-date the May 2026 fix bundle and aren't credible for per-tool claims)
+- [2026-05-12 -- BEAM-recovery Arms A/B/C](experiments/2026-05-12-beam-recovery-arms-abc.md)
+- (older runs documented in [beam-benchmark.md](beam-benchmark.md) -- note that those pre-date the May 2026 fix bundle and aren't credible for per-tool claims)

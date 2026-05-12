@@ -1,14 +1,14 @@
 """Regression tests for the two pre-test gap closures:
 
-1. **Per-question voice_scores threading** — `evaluate_conversation()`
+1. **Per-question voice_scores threading** -- `evaluate_conversation()`
    now writes a `recall_provenance` summary into each per-question
    result dict so post-hoc per-voice attribution analysis (Recipe E
    in `docs/benchmark-results-analysis.md`) works from the result
    file directly. Without this, Theses 1, 2, 3 in the experiment
-   plan can't be falsified — they require knowing which voice
+   plan can't be falsified -- they require knowing which voice
    contributed to which question.
 
-2. **`MNEMOSYNE_BEAM_OPTIMIZATIONS` parser migration** — was using
+2. **`MNEMOSYNE_BEAM_OPTIMIZATIONS` parser migration** -- was using
    the brittle `.lower() in ("1","true","yes")` pattern that rejects
    `on` and whitespace. Now goes through `_env_truthy()` in `beam.py`,
    matching the convention from PR #91.
@@ -85,7 +85,7 @@ class TestAnswerWithMemoryReturnMemoriesKwarg:
             yield Path(tmpdir) / "test.db"
 
     def test_default_returns_string(self, temp_db, fake_llm, monkeypatch):
-        """Default — back-compat with all existing callers."""
+        """Default -- back-compat with all existing callers."""
         monkeypatch.setenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", "1")
         beam = BeamMemory(session_id="s1", db_path=temp_db)
         from tools.evaluate_beam_end_to_end import answer_with_memory
@@ -117,7 +117,7 @@ class TestAnswerWithMemoryReturnMemoriesKwarg:
         assert isinstance(memories, list)
 
     def test_bypass_path_returns_empty_memories(self, temp_db, fake_llm, monkeypatch):
-        """TR bypass short-circuits before recall — memories list
+        """TR bypass short-circuits before recall -- memories list
         should be empty but the field still present (schema parity)."""
         monkeypatch.delenv("MNEMOSYNE_BENCHMARK_PURE_RECALL", raising=False)
         beam = BeamMemory(session_id="s1", db_path=temp_db)
@@ -242,11 +242,11 @@ class TestRecallProvenanceInResultDict:
         # The field is added to the per-question result dict
         assert '"recall_provenance": recall_provenance,' in harness_src, (
             "evaluate_conversation no longer writes recall_provenance "
-            "into per-question result dict — Recipe E in "
+            "into per-question result dict -- Recipe E in "
             "docs/benchmark-results-analysis.md broken"
         )
         # And `return_memories=True` is passed when calling answer_with_memory
         assert "return_memories=True" in harness_src, (
             "evaluate_conversation no longer requests memories for "
-            "provenance — recall_provenance will be empty"
+            "provenance -- recall_provenance will be empty"
         )

@@ -58,7 +58,7 @@ from mnemosyne.core.beam import BeamMemory, init_beam, _embeddings, _vec_availab
 # --- Config ---
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 if not OPENROUTER_API_KEY:
-    # Try to load from file — check opencode first, then openrouter
+    # Try to load from file -- check opencode first, then openrouter
     for _kf in ["/tmp/opencode_key.txt", "/tmp/openrouter_key.txt"]:
         _key_file = Path(_kf)
         if _key_file.exists():
@@ -72,7 +72,7 @@ if not OPENROUTER_API_KEY:
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 DEFAULT_MODEL = "deepseek-v4-pro"
-FALLBACK_MODELS = []  # Disabled — fallback cascade burned $30 in credits
+FALLBACK_MODELS = []  # Disabled -- fallback cascade burned $30 in credits
 DEFAULT_TOP_K = 10  # Memories to retrieve per question
 MAX_MEMORY_CONTEXT_CHARS = 8000  # Max chars of retrieved context to send to LLM
 
@@ -82,7 +82,7 @@ MAX_MEMORY_CONTEXT_CHARS = 8000  # Max chars of retrieved context to send to LLM
 # Strips whitespace so accidental leading/trailing spaces in shell
 # exports don't get treated as falsy. Anything else → False.
 # Pre-fix the parser was `lower() in ("1", "true", "yes")` which
-# rejected `on` and was whitespace-sensitive — surprised at least one
+# rejected `on` and was whitespace-sensitive -- surprised at least one
 # operator running with `MNEMOSYNE_BENCHMARK_PURE_RECALL=on`.
 _ENV_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -436,7 +436,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
     stats = {"wm_count": 0, "ep_count": 0, "sp_count": 0, "total_chars": 0}
     
     # In-memory context→value facts index for direct fact matching.
-    # Format: {"context phrase": "fact value"} — maps question-like phrases to answers.
+    # Format: {"context phrase": "fact value"} -- maps question-like phrases to answers.
     # Example: "My first sprint ends on" → "March 29"
     # Built during ingestion, queried during answering for zero-LLM fact extraction.
     import re as _re2
@@ -471,7 +471,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
             stats["total_chars"] += len(content)
             
             # Extract context→value facts: words before AND after each fact value
-            # SKIP version numbers (e.g., "3.39", "2.3.1") — they pollute fact matching
+            # SKIP version numbers (e.g., "3.39", "2.3.1") -- they pollute fact matching
             # and are never the answer to BEAM questions (which ask about dates, counts, names).
             _VERSION_RE = _re2.compile(r'^\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.]+)?$')
             for match in _FACT_VALUE_RE.finditer(content):
@@ -541,7 +541,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         # Pre-E1 this block built a synthetic summary
         # ("Batch N: first_3_msg_contents[:100]") + DELETEd all source
         # working_memory rows. ~99% of message content was discarded
-        # before recall could see it — the entire BEAM benchmark
+        # before recall could see it -- the entire BEAM benchmark
         # corpus was destroyed at ingest.
         #
         # Post-E1 (option b, depends on E3 additive sleep): backdate
@@ -549,7 +549,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         # cutoff and let beam.sleep() produce real LLM-generated (or
         # AAAK-fallback) summaries on top of preserved originals.
         # The scoped UPDATE prevents cross-batch timestamp
-        # contamination — without the `id IN (...)` filter, a
+        # contamination -- without the `id IN (...)` filter, a
         # mid-sleep failure on batch N would let batch N+1's UPDATE
         # walk every still-unconsolidated row in the session and
         # rewrite their timestamps, corrupting per-row temporal
@@ -558,7 +558,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
             cursor = beam.conn.cursor()
             # Backdate is derived from WORKING_MEMORY_TTL_HOURS so it
             # survives operator config changes via env var. sleep()'s
-            # cutoff is TTL/2, _trim's cutoff is TTL — backdating by
+            # cutoff is TTL/2, _trim's cutoff is TTL -- backdating by
             # TTL+1 ensures the row is on the consolidatable side of
             # sleep's cutoff while staying outside the trim window's
             # safety margin (consolidated_at exempts from trim post-E3
@@ -585,7 +585,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
                 # BATCH_SIZE, in which case a single sleep() call
                 # leaves some backdated rows un-consolidated. Those
                 # rows then carry a TTL-old timestamp AND
-                # consolidated_at IS NULL — exactly the predicate
+                # consolidated_at IS NULL -- exactly the predicate
                 # _trim_working_memory uses to DELETE them on the
                 # next remember_batch call. Loop until sleep returns
                 # no_op (or errors) so the contract holds regardless
@@ -601,7 +601,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
                         )
                         # If sleep drained fewer than SLEEP_BATCH_SIZE
                         # rows, the eligible set is empty and the
-                        # next call would be no_op — break early.
+                        # next call would be no_op -- break early.
                         items = int(result.get("items_consolidated", 0) or 0)
                         if items == 0:
                             break
@@ -617,7 +617,7 @@ def ingest_conversation(beam: BeamMemory, messages: list[dict]) -> dict:
         except Exception as e:
             # Log the failure to stats so the operator sees it. Pre-E1
             # the equivalent block also swallowed silently, but the
-            # consolidation IS the point of the experiment — a silent
+            # consolidation IS the point of the experiment -- a silent
             # benchmark that "succeeds" with 0 episodic rows is the
             # exact failure mode the test suite is supposed to catch.
             stats.setdefault("sleep_errors", []).append(repr(e))
@@ -642,7 +642,7 @@ STEP 4 - ANSWER: Provide a thorough final answer with all relevant details from 
 RULES:
 - For EVENT ORDERING: list items in chronological order as they appear.
 - For CONTRADICTION: explicitly state "The conversation contains contradictory information: [A] vs [B]"
-- For SUMMARIZATION: include all key details — project stages, features, timelines, security, database, challenges.
+- For SUMMARIZATION: include all key details -- project stages, features, timelines, security, database, challenges.
 - NEVER say "I don't have enough information" unless absolutely nothing in the context mentions the topic.
 - For "how many" questions, provide the specific count, not a range."""
 
@@ -1151,11 +1151,11 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     (env unset or '0') preserves the existing benchmark mode.
 
     Returns:
-        str when `return_memories=False` (default — backward-compat).
-        tuple[str, list[dict]] when `return_memories=True` — the second
+        str when `return_memories=False` (default -- backward-compat).
+        tuple[str, list[dict]] when `return_memories=True` -- the second
         element is the retrieved memories list (post-multi-strategy,
         pre-LLM-context-build). Each memory dict carries `voice_scores`
-        from Gap G — required for per-voice attribution analysis.
+        from Gap G -- required for per-voice attribution analysis.
         Bypass paths return `(answer, [])` since they short-circuit
         before recall.
     """
@@ -1206,7 +1206,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     # ---- END PER-ABILITY BYPASSES ----
     
     # FULL-CONTEXT MODE: send the entire conversation to the LLM, bypassing Mnemosyne retrieval.
-    # This tests the LLM's reading comprehension ceiling — useful for establishing the upper bound.
+    # This tests the LLM's reading comprehension ceiling -- useful for establishing the upper bound.
     # Controlled by FULL_CONTEXT_MODE env var.
     # HYBRID: try context→value matching first for factual questions (IE/MR/KU),
     # then fall through to full-context for complex reasoning (ABS/CR/EO/SUM/TR).
@@ -1225,7 +1225,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
         # ---- Phase 1: Try context→value matching for factual questions ----
         # Only use context→value for Information Extraction (IE) and Knowledge Understanding (KU).
         # MR (Multi-hop) requires reasoning across multiple messages; let full-context handle it.
-        # Gated by pure_recall — when ON, full-context mode still hits the LLM with raw
+        # Gated by pure_recall -- when ON, full-context mode still hits the LLM with raw
         # conversation but skips the zero-LLM context→value shortcut.
         _FACT_ABILITIES = {'IE', 'KU'}
         if not _pure_recall and ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
@@ -1286,11 +1286,11 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     # At ingestion, we built beam._context_facts: {"words around fact": ["fact value"]}.
     # Now we try to match the question against context phrases and return the value directly.
     # Only used for factual question types (IE, MR, KU, TR) with strong matches.
-    # ABS, CR, EO, SUM need LLM reasoning — we skip context matching for those.
+    # ABS, CR, EO, SUM need LLM reasoning -- we skip context matching for those.
     context_answer = None
     # Only use context→value for Information Extraction (IE) and Knowledge Understanding (KU).
     # MR (Multi-hop) requires reasoning across multiple messages; CR/TR/EO/SUM need LLM.
-    # Gated by pure_recall — when ON, IE/KU questions go through full recall+LLM
+    # Gated by pure_recall -- when ON, IE/KU questions go through full recall+LLM
     # rather than returning a side-indexed value directly.
     _FACT_ABILITIES = {'IE', 'KU'}
     if not _pure_recall and ability in _FACT_ABILITIES and hasattr(beam, '_context_facts') and beam._context_facts:
@@ -1331,7 +1331,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
         except Exception:
             pass  # Fact recall is best-effort
     
-    # LLM RERANKING: DISABLED — rate-limit avoidance + proven ineffective (Reality Check 5.3)
+    # LLM RERANKING: DISABLED -- rate-limit avoidance + proven ineffective (Reality Check 5.3)
     # The re-ranker cannot beat baseline by >3pp and causes 429 rate-limit cascades.
     # Left as dead code for reference.
 
@@ -1366,7 +1366,7 @@ def answer_with_memory(llm: LLMClient, beam: BeamMemory, question: str,
     context = ""  # Built below from memories
 
     # Build recent context from last N messages. Pure-recall mode SKIPS
-    # this entirely — the LLM sees only RETRIEVED MEMORIES, so the
+    # this entirely -- the LLM sees only RETRIEVED MEMORIES, so the
     # answer quality reflects what each arm's recall produced (rather
     # than the harness silently leaking the last 12 raw messages into
     # every prompt, which inflates recency-anchored answers and masks
@@ -1570,7 +1570,7 @@ def evaluate_conversation(
 
         # Compact recall-provenance summary so per-voice attribution
         # analysis (docs/benchmark-results-analysis.md Recipe E) works
-        # from the result file directly — no DB re-query needed. Full
+        # from the result file directly -- no DB re-query needed. Full
         # memory dicts would be ~10× larger; this summary captures
         # what an analyst actually needs.
         recall_provenance = _summarize_recall_memories(recall_memories)
@@ -1737,7 +1737,7 @@ def main():
                         help="Send full conversation to LLM (ceiling test, bypasses retrieval)")
     parser.add_argument("--pure-recall", action="store_true",
                         help="Disable per-ability bypasses + RECENT CONVERSATION injection. "
-                             "Forces every answer through Mnemosyne recall — what the "
+                             "Forces every answer through Mnemosyne recall -- what the "
                              "BEAM-recovery experiment needs to measure arm-vs-arm "
                              "recall quality without harness-side oracle contamination. "
                              "Equivalent to MNEMOSYNE_BENCHMARK_PURE_RECALL=1.")
@@ -1750,7 +1750,7 @@ def main():
     parser.add_argument("--config-id", default=None,
                         help="Run identifier written into the paired-outcomes "
                              "JSONL alongside results JSON. Defaults to a "
-                             "short hash of the MNEMOSYNE_* env snapshot — "
+                             "short hash of the MNEMOSYNE_* env snapshot -- "
                              "useful for distinguishing back-to-back ablation "
                              "phases. Override when you want a human-readable "
                              "label (e.g. 'phase3a-no-fact-voice').")
@@ -1845,10 +1845,10 @@ def main():
         os.environ["MNEMOSYNE_BENCHMARK_PURE_RECALL"] = "1"
         if args.full_context or _env_truthy("FULL_CONTEXT_MODE"):
             # Conflict: warn loudly so the operator isn't surprised.
-            print("  Mode: PURE-RECALL (overrides FULL_CONTEXT/--full-context — "
+            print("  Mode: PURE-RECALL (overrides FULL_CONTEXT/--full-context -- "
                   "every answer goes through Mnemosyne recall)")
         else:
-            print("  Mode: PURE-RECALL (per-ability bypasses + RECENT CONTEXT disabled — "
+            print("  Mode: PURE-RECALL (per-ability bypasses + RECENT CONTEXT disabled -- "
                   "every answer goes through Mnemosyne recall)")
     elif args.full_context:
         os.environ["FULL_CONTEXT_MODE"] = "1"
@@ -1930,7 +1930,7 @@ def main():
             # Gap E: append per-question paired outcomes to a flat JSONL
             # so downstream analysis can paired-bootstrap CIs across
             # multiple A/B runs. Each line records (config_id, qid,
-            # ability, score, correct, scale, ts) — enough to compute
+            # ability, score, correct, scale, ts) -- enough to compute
             # paired deltas without re-parsing the main results JSON.
             # Append-only with run_started_at + config_id means multiple
             # phases accumulate in one file; analyst filters by config_id.

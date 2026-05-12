@@ -1,4 +1,4 @@
-# BEAM Benchmark — Output Files and Analysis Guide
+# BEAM Benchmark -- Output Files and Analysis Guide
 
 **Audience:** anyone (human or AI assistant) reading the result files produced by `tools/evaluate_beam_end_to_end.py` and computing per-phase / per-arm comparisons.
 
@@ -92,7 +92,7 @@ Top-level JSON object: `{metadata, results}`. Schema:
 
 ### `metadata.diagnostics.recall`
 
-Recall pipeline provenance (`get_recall_diagnostics()` snapshot at run end). Tells you which recall tier produced each kept row — critical for sanity-checking that recall isn't dominated by the weak-signal substring-fallback path.
+Recall pipeline provenance (`get_recall_diagnostics()` snapshot at run end). Tells you which recall tier produced each kept row -- critical for sanity-checking that recall isn't dominated by the weak-signal substring-fallback path.
 
 ```jsonc
 {
@@ -103,7 +103,7 @@ Recall pipeline provenance (`get_recall_diagnostics()` snapshot at run end). Tel
     "calls_using_wm_fallback": 12,      // calls that fell back to WM substring scan
     "calls_using_em_fallback": 5,
     "calls_truly_empty": 0,             // calls where every tier produced zero kept rows
-    "wm_fallback_rate": 0.04,           // 0.0-1.0 — high (>0.2) = signal-poor, treat results skeptically
+    "wm_fallback_rate": 0.04,           // 0.0-1.0 -- high (>0.2) = signal-poor, treat results skeptically
     "em_fallback_rate": 0.017
   },
   "by_tier": {
@@ -147,7 +147,7 @@ Fact-extraction pipeline provenance (`get_extraction_stats()` snapshot). Surface
 
 ## File 2: `beam_e2e_summary.json`
 
-Aggregate ability scores per scale — small, summary-only.
+Aggregate ability scores per scale -- small, summary-only.
 
 ```jsonc
 {
@@ -190,17 +190,17 @@ One JSON object per line. **Append-only across runs.** Filter by `config_id` to 
   "conversation_id": "conv_abc",               // BEAM conversation id
   "qid": "q_001",                              // BEAM question id (stable across runs)
   "ability": "IE",                             // ability code (see "ability codes" below)
-  "score": 1.0,                                // raw rubric score: float 0.0–1.0
+  "score": 1.0,                                // raw rubric score: float 0.0-1.0
   "correct": true                              // bool: score >= 0.5 (partial credit counts)
 }
 ```
 
 Field meanings:
 
-- `config_id` — every row in a single run shares this. Use for paired-arm comparisons. If `--config-id` not given, auto-derived as `"cfg-" + sha256(canonical_env)[:10]`.
-- `qid` — stable across runs. Lets you pair "config A's score on Q" with "config B's score on Q".
-- `score` — raw rubric. Use for continuous deltas + CIs.
-- `correct` — bool threshold (`score >= 0.5`). Use for accuracy-style metrics. Analysts wanting stricter (e.g., only 1.0 = correct) can re-threshold off `score`.
+- `config_id` -- every row in a single run shares this. Use for paired-arm comparisons. If `--config-id` not given, auto-derived as `"cfg-" + sha256(canonical_env)[:10]`.
+- `qid` -- stable across runs. Lets you pair "config A's score on Q" with "config B's score on Q".
+- `score` -- raw rubric. Use for continuous deltas + CIs.
+- `correct` -- bool threshold (`score >= 0.5`). Use for accuracy-style metrics. Analysts wanting stricter (e.g., only 1.0 = correct) can re-threshold off `score`.
 
 ---
 
@@ -296,7 +296,7 @@ print(f"  Falsifiable: {'yes (CI excludes 0)' if ci_lo > 0 or ci_hi < 0 else 'no
 
 ### D. Fallback-rate sanity check
 
-If `wm_fallback_rate` or `em_fallback_rate` is high (>0.2), recall is dominated by the weak-signal substring fallback and arm-vs-arm comparisons aren't credible — both arms are mostly hitting the same fallback path.
+If `wm_fallback_rate` or `em_fallback_rate` is high (>0.2), recall is dominated by the weak-signal substring fallback and arm-vs-arm comparisons aren't credible -- both arms are mostly hitting the same fallback path.
 
 ```python
 import json
@@ -305,7 +305,7 @@ diag = data["metadata"]["diagnostics"]["recall"]["totals"]
 print(f"WM fallback rate: {diag['wm_fallback_rate']:.1%}")
 print(f"EM fallback rate: {diag['em_fallback_rate']:.1%}")
 if diag["wm_fallback_rate"] > 0.2 or diag["em_fallback_rate"] > 0.2:
-    print("⚠ High fallback rate — arm-vs-arm comparisons may not be credible")
+    print("⚠ High fallback rate -- arm-vs-arm comparisons may not be credible")
 ```
 
 ### E. Per-voice attribution (per question)
@@ -359,7 +359,7 @@ for voice, n in top_voice_counts.most_common():
     print(f"  {voice}: {n}")
 ```
 
-To compute per-voice contribution by ability — e.g., "how much did the fact voice contribute to TR vs IE questions?":
+To compute per-voice contribution by ability -- e.g., "how much did the fact voice contribute to TR vs IE questions?":
 
 ```python
 fact_contrib_by_ability = {}  # ability → list of fact voice_sums
@@ -388,9 +388,9 @@ import json
 data = json.load(open("results/beam_e2e_results.json"))
 if not data["metadata"]["config"]["pure_recall"]:
     if data["metadata"]["config"]["allow_harness_oracles"]:
-        print("⚠ Run intentionally used harness oracles — not comparable to other arms")
+        print("⚠ Run intentionally used harness oracles -- not comparable to other arms")
     else:
-        print("⚠ Run was not in pure-recall mode — results compromised")
+        print("⚠ Run was not in pure-recall mode -- results compromised")
 ```
 
 The harness preflight refuses to start without pure-recall OR explicit `--allow-harness-oracles`, but the metadata is the post-hoc verification.
@@ -401,7 +401,7 @@ The harness preflight refuses to start without pure-recall OR explicit `--allow-
 
 If you're an AI assistant reading these result files to help an operator interpret a BEAM benchmark run, here's what to know in compressed form:
 
-1. **Three files matter.** `beam_e2e_results.json` (rich, per-question + metadata + diagnostics), `beam_e2e_summary.json` (per-ability averages, summary-only), `paired_outcomes.jsonl` (one row per question, append-only across multiple runs — filter by `config_id`).
+1. **Three files matter.** `beam_e2e_results.json` (rich, per-question + metadata + diagnostics), `beam_e2e_summary.json` (per-ability averages, summary-only), `paired_outcomes.jsonl` (one row per question, append-only across multiple runs -- filter by `config_id`).
 
 2. **Scores are rubric, not binary.** `score` is `0.0` / `0.5` / `1.0` per question. `correct` (in the JSONL) is `score >= 0.5`. Two ways to compute "accuracy": mean of `score` (continuous), or mean of `correct` (binary at 0.5 threshold).
 
@@ -429,5 +429,5 @@ If you're an AI assistant reading these result files to help an operator interpr
 - **"This number looks too high."** Check `metadata.config.pure_recall`. If false, the harness oracles (TR timeline / CR injection / IE-KU `_context_facts` / RECENT CONVERSATION) likely produced answers without going through Mnemosyne recall.
 - **"This number looks too low."** Check `metadata.diagnostics.recall.totals.fallback_rate`. If high, recall returned mostly fallback noise.
 - **"Two runs that should be identical aren't."** Check `metadata.config.env` for both. The env snapshot includes every `MNEMOSYNE_*` env var at run start. A toggle the operator forgot to set is a silent confound.
-- **"The polyphonic run scored lower than linear."** Check `voice_scores` on per-result level — possibly only 2 of 4 voices contributed because the others returned empty (e.g., temporal voice ignored a non-temporal query).
+- **"The polyphonic run scored lower than linear."** Check `voice_scores` on per-result level -- possibly only 2 of 4 voices contributed because the others returned empty (e.g., temporal voice ignored a non-temporal query).
 - **"My CI is huge."** Probably small sample size. Either increase `--sample` or report median+IQR alongside mean.

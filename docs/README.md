@@ -22,4 +22,4 @@ Local-first, zero-cloud memory for AI agents. SQLite-backed. Sub-millisecond. Fu
 - **PyPI:** [mnemosyne-memory](https://pypi.org/project/mnemosyne-memory/)
 - **Contributing:** See [CONTRIBUTING.md](../CONTRIBUTING.md) in the repo root
 - **Updating:** See [UPDATING.md](../UPDATING.md) for upgrade and rollback instructions
-- **License:** MIT — see [LICENSE](../LICENSE)
+- **License:** MIT -- see [LICENSE](../LICENSE)

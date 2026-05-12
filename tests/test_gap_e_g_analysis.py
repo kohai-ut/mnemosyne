@@ -2,7 +2,7 @@
 (linear-path voice_scores parity).
 
 Both gaps were filed in the BEAM-recovery experiment plan as
-post-execution analysis polish — they don't block the experiment
+post-execution analysis polish -- they don't block the experiment
 running, but they make post-hoc per-tool attribution credible.
 
 - **Gap G:** `BeamMemory.recall()` linear-path result dicts now carry
@@ -44,7 +44,7 @@ def temp_db():
 
 
 # ─────────────────────────────────────────────────────────────────
-# Gap G — Linear-path voice_scores parity
+# Gap G -- Linear-path voice_scores parity
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -92,7 +92,7 @@ class TestLinearVoiceScores:
 
         results = beam.recall("deployment", top_k=5)
         if not results:
-            pytest.skip("recall returned empty — environment-dependent")
+            pytest.skip("recall returned empty -- environment-dependent")
         vs = results[0]["voice_scores"]
         # Linear-side keys (different from polyphonic's vec/graph/fact/temporal).
         expected_keys = {"vec", "fts", "keyword", "importance", "recency_decay"}
@@ -139,7 +139,7 @@ class TestLinearVoiceScores:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Gap E — Paired-outcomes JSONL
+# Gap E -- Paired-outcomes JSONL
 # ─────────────────────────────────────────────────────────────────
 
 
