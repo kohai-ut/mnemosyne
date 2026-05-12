@@ -312,8 +312,21 @@ class Mnemosyne:
         # table that fact_recall() queries (the wrapper used to reimplement
         # only the triples half of extraction inline, leaving facts table
         # writes silently skipped — see C12.a).
+
+        # Content sanitization: extract binary payloads to blob storage.
+        # Applied here so the legacy memories table row also gets the
+        # sanitized content (not just the BEAM working_memory row).
+        from mnemosyne.core.content_sanitizer import sanitize_content as _sanitize
+        sanitized_content, blob_meta = _sanitize(content)
+        if blob_meta:
+            metadata = (metadata or {}).copy()
+            metadata["_blob"] = blob_meta
+
+        _content = sanitized_content if blob_meta else content
+
         memory_id = self.beam.remember(
-            content, source=source, importance=importance, metadata=metadata,
+            _content, source=source,
+            importance=importance, metadata=metadata,
             valid_until=valid_until, scope=scope,
             extract_entities=extract_entities, extract=extract,
         )
@@ -325,13 +338,13 @@ class Mnemosyne:
             INSERT OR REPLACE INTO memories (id, content, source, timestamp, session_id, importance, metadata_json)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            memory_id, content, source, timestamp, self.session_id,
+            memory_id, _content, source, timestamp, self.session_id,
             importance, json.dumps(metadata or {})
         ))
 
         # Legacy embedding store
         if _embeddings.available():
-            vec = _embeddings.embed([content])
+            vec = _embeddings.embed([_content])
             if vec is not None:
                 cursor.execute("""
                     INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model)

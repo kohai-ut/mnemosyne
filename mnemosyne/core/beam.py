@@ -1464,6 +1464,14 @@ class BeamMemory:
         # silently fall through to UNKNOWN_WEIGHT at scoring time.
         veracity = clamp_veracity(veracity, context="remember")
 
+        # --- Content sanitization: extract binary payloads to blob storage ---
+        from mnemosyne.core.content_sanitizer import sanitize_content as _sanitize
+        sanitized_content, blob_meta = _sanitize(content)
+        if blob_meta:
+            metadata = (metadata or {}).copy()
+            metadata["_blob"] = blob_meta
+            content = sanitized_content
+
         # --- Typed memory classification (Phase 1 — zero overhead) ---
         memory_type = None
         if classify_memory is not None:
@@ -1657,6 +1665,15 @@ class BeamMemory:
             veracity, context="remember_batch.default"
         )
         for item in items:
+            # --- Content sanitization: extract binary payloads to blob storage ---
+            from mnemosyne.core.content_sanitizer import sanitize_content as _sanitize
+            raw_content = item["content"]
+            sanitized_content, blob_meta = _sanitize(raw_content)
+            if blob_meta:
+                item["content"] = sanitized_content
+                item_meta = item.get("metadata") or {}
+                item["metadata"] = {**item_meta, "_blob": blob_meta}
+
             memory_id = _generate_id(item["content"])
             ids.append(memory_id)
             # Typed memory classification
