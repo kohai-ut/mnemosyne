@@ -151,7 +151,10 @@ def test_remember_batch_extracts_gists_and_consolidated_facts(temp_db):
 def test_per_row_veracity_threads_into_consolidated_facts(temp_db):
     """Per-row veracity must propagate to VeracityConsolidator so
     consolidated_facts weighting is per-row, not collapsed to the
-    method-level default."""
+    method-level default. /review caught the prior conditional skip
+    (Claude M3 — test passed vacuously when regex didn't extract
+    either subject); this version asserts extraction succeeded first
+    so a future regex change can't silently neuter the contract."""
     beam = BeamMemory(session_id="e2-ver", db_path=temp_db)
     beam.remember_batch([
         {"content": "Dana is a developer", "veracity": "stated"},
@@ -163,14 +166,23 @@ def test_per_row_veracity_threads_into_consolidated_facts(temp_db):
         "WHERE subject IN ('Dana', 'Eric') "
         "ORDER BY subject"
     ).fetchall()
-    # At least one consolidated_fact per subject; confidences should
-    # differ (stated >  inferred in the veracity weight table).
     by_subject = {r[0]: r[3] for r in rows}
-    if "Dana" in by_subject and "Eric" in by_subject:
-        assert by_subject["Dana"] != by_subject["Eric"], (
-            "stated and inferred veracity collapsed to same confidence — "
-            "per-row veracity didn't reach VeracityConsolidator"
-        )
+    # Hard-fail if the regex didn't extract either subject — the
+    # test's parity claim depends on both subjects landing in
+    # consolidated_facts. A vacuous skip here would let a future
+    # change to extract_facts silently break veracity-threading.
+    assert "Dana" in by_subject, (
+        f"Regex didn't extract subject 'Dana' from 'Dana is a "
+        f"developer' — consolidated_facts subjects: {list(by_subject)}"
+    )
+    assert "Eric" in by_subject, (
+        f"Regex didn't extract subject 'Eric' from 'Eric is a tester' "
+        f"— consolidated_facts subjects: {list(by_subject)}"
+    )
+    assert by_subject["Dana"] != by_subject["Eric"], (
+        "stated and inferred veracity collapsed to same confidence — "
+        "per-row veracity didn't reach VeracityConsolidator"
+    )
 
 
 def test_per_row_source_flows_to_has_source_annotation(temp_db):
@@ -326,13 +338,16 @@ def test_remember_batch_parity_with_remember_for_gists(temp_db):
 
 def test_enrichment_exception_does_not_break_batch(temp_db):
     """If any single row's enrichment helper raises, the working_memory
-    insert + embedding write must still succeed for ALL rows. The
-    underlying helpers swallow exceptions internally (best-effort
-    pattern), but we test the contract end-to-end so a future refactor
-    that strips a try/except doesn't silently regress data integrity."""
+    insert must succeed for ALL rows AND enrichment must continue for
+    rows after the failure. /review caught the prior test as
+    tautological (Claude M4) — the working_memory commit happens
+    BEFORE the enrichment loop, so the row-count check was trivially
+    true. This version asserts both contracts: rows landed AND later
+    rows' enrichment still produced annotations."""
     beam = BeamMemory(session_id="e2-fault", db_path=temp_db)
     # Inject a failure into _ingest_graph_and_veracity for one specific
-    # content; verify all rows still landed in working_memory.
+    # content; verify all rows still landed in working_memory AND row 3
+    # got its temporal annotation.
     original = beam._ingest_graph_and_veracity
     call_count = {"n": 0}
 
@@ -343,21 +358,14 @@ def test_enrichment_exception_does_not_break_batch(temp_db):
         return original(memory_id, content, source, veracity)
 
     beam._ingest_graph_and_veracity = faulty  # type: ignore
-    try:
-        ids = beam.remember_batch([
-            {"content": "ok row 1"},
-            {"content": "row with boom inside"},
-            {"content": "ok row 3"},
-        ])
-    except Exception:
-        # If the batch propagates the failure, that's an acceptable
-        # contract (best-effort means we choose to roll forward); the
-        # important property is that working_memory was written. Check
-        # that explicitly even if remember_batch re-raised.
-        pass
 
-    # All three rows should be in working_memory regardless of
-    # enrichment failure on row 2.
+    ids = beam.remember_batch([
+        {"content": "ok row 1"},
+        {"content": "row with boom inside"},
+        {"content": "ok row 3"},
+    ])
+
+    # Contract A: all 3 rows landed in working_memory.
     wm_count = beam.conn.execute(
         "SELECT COUNT(*) FROM working_memory WHERE session_id = ?",
         ("e2-fault",),
@@ -366,6 +374,217 @@ def test_enrichment_exception_does_not_break_batch(temp_db):
         f"enrichment failure tore down working_memory inserts: "
         f"only {wm_count}/3 rows present"
     )
-    assert call_count["n"] >= 1, (
-        "enrichment helper never called — patch didn't take effect"
+
+    # Contract B: enrichment ran for all 3 rows. The helper was called
+    # 3 times (the assertion the prior test missed — without this the
+    # loop could short-circuit on row 2's exception and never reach
+    # row 3 yet the wm_count check would still pass).
+    assert call_count["n"] == 3, (
+        f"enrichment loop short-circuited after row-2 failure; "
+        f"_ingest_graph_and_veracity called {call_count['n']} times, "
+        "expected 3"
     )
+
+    # Contract C: row 3 got its temporal annotation (proves
+    # _add_temporal_triple ran for the row after the failure — the
+    # whole point of the inner try/except in the helpers is so a
+    # bad row doesn't blow up later rows' enrichment).
+    row3_kinds = {
+        r[0] for r in _annotation_rows(beam.conn, ids[2])
+    }
+    assert "occurred_on" in row3_kinds, (
+        f"row 3 missing occurred_on annotation after row-2 failure: "
+        f"row3 annotations = {row3_kinds}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# /review hardening — commit 2 regression guards
+# ---------------------------------------------------------------------------
+
+
+class TestReviewHardening:
+    """Closes the gaps surfaced by the /review army on commit 1.
+
+    Each test pins one of the must-fix findings:
+      - per-row commit cascade → single deferred commit
+      - regex backtracking via 4096-char content cap
+      - MEMORY_ADDED event emission parity with remember()
+      - meta_by_id dict (vs prior parallel-list + assert)
+    """
+
+    def test_enrichment_loop_uses_single_deferred_commit(
+        self, temp_db, monkeypatch
+    ):
+        """The enrichment loop must wrap inner helper commits in
+        _deferred_commits so a 250K-row batch doesn't produce
+        millions of fsync round-trips. We verify by counting
+        `_real_commit` invocations on the connection — the inner
+        helpers all go through `commit()` which the defer flag
+        short-circuits; only the deferred-commits context manager
+        calls `_real_commit()` (once at the end of the scope)."""
+        from mnemosyne.core.beam import _BeamConnection
+
+        beam = BeamMemory(session_id="e2-commits", db_path=temp_db)
+        assert isinstance(beam.conn, _BeamConnection), (
+            "BeamMemory.conn should be a _BeamConnection (via "
+            "_get_connection's factory); the deferred-commit "
+            "optimization depends on it"
+        )
+
+        # Wrap _real_commit to count invocations. The inner helpers'
+        # commit() calls short-circuit on _defer_commit=True and
+        # never reach _real_commit, so this counter measures the
+        # number of actual fsync round-trips during the batch.
+        commit_count = {"n": 0}
+        original_real_commit = beam.conn._real_commit
+
+        def counting_real_commit():
+            commit_count["n"] += 1
+            return original_real_commit()
+
+        monkeypatch.setattr(
+            beam.conn, "_real_commit", counting_real_commit
+        )
+
+        beam.remember_batch([
+            {"content": "Henry is a researcher"},
+            {"content": "Ivy is a designer"},
+            {"content": "Jack is a writer"},
+        ])
+
+        # Inside _deferred_commits, exactly one _real_commit fires
+        # at the end of the loop. Outside the deferred scope, the
+        # bulk INSERT's commit and embedding-write commits go through
+        # the regular `commit()` method (no defer flag set there), so
+        # _real_commit isn't called for them. Allow ≤2 to leave slack
+        # for any future addition; the regression we're guarding
+        # against produces 10-15 _real_commit calls per row.
+        assert commit_count["n"] <= 2, (
+            f"too many real-commit fsync round-trips ({commit_count['n']}) "
+            "during enrichment loop — _deferred_commits not engaged "
+            "(per-row commit cascade regressed)"
+        )
+
+    def test_extract_facts_caps_long_content(self, temp_db):
+        """`extract_facts` (used by _ingest_graph_and_veracity) must
+        cap content at 4096 chars to prevent regex backtracking on
+        adversarial long inputs. We verify by passing a 10KB string
+        of repeated "A is " patterns — extraction should return
+        bounded results in bounded time, not stall."""
+        beam = BeamMemory(session_id="e2-cap", db_path=temp_db)
+        # 10KB of pattern-rich content.
+        long_content = ("Anna is a developer. " * 600).strip()
+        assert len(long_content) > 4096, (
+            "test setup: content not long enough to exercise cap"
+        )
+        import time
+        start = time.monotonic()
+        beam.remember_batch([{"content": long_content}])
+        elapsed = time.monotonic() - start
+        # If the cap is broken, this could take many seconds /
+        # minutes. The cap should bring it well under 5s even on a
+        # slow CI machine.
+        assert elapsed < 5.0, (
+            f"long-content batch took {elapsed:.2f}s — content cap "
+            "likely not applied (regex backtracking on full input)"
+        )
+
+    def test_remember_batch_emits_memory_added_event_per_row(self, temp_db):
+        """/review caught the parity gap: `remember()` ends with
+        `_emit_event("MEMORY_ADDED", ...)` but pre-fix `remember_batch`
+        didn't. DeltaSync streaming + any other event consumer saw
+        zero batch ingest events. Post-fix every batch row emits
+        MEMORY_ADDED."""
+        beam = BeamMemory(session_id="e2-events", db_path=temp_db)
+        captured = []
+
+        def collect(event):
+            captured.append(event)
+
+        beam._event_emitter = collect
+
+        ids = beam.remember_batch([
+            {"content": "Event row A", "importance": 0.3},
+            {"content": "Event row B", "importance": 0.4},
+            {"content": "Event row C", "importance": 0.5},
+        ])
+        # MemoryEvent is a dataclass-like object with attributes:
+        # event_type (EventType enum) and memory_id (str). One
+        # MEMORY_ADDED per row.
+        added = [
+            e for e in captured
+            if getattr(e, "event_type", None) is not None
+            and e.event_type.name == "MEMORY_ADDED"
+        ]
+        assert len(added) == 3, (
+            f"expected 3 MEMORY_ADDED events, got {len(added)} "
+            f"(captured event types: "
+            f"{[getattr(e, 'event_type', None) for e in captured]})"
+        )
+        # Each event should carry the corresponding memory_id.
+        event_ids = {e.memory_id for e in added}
+        assert event_ids == set(ids), (
+            f"event memory_ids {event_ids} != batch returned ids {set(ids)}"
+        )
+
+    def test_meta_by_id_dict_survives_python_o(self, temp_db):
+        """The prior `assert mid_check == memory_id` parallel-list
+        integrity check would have stripped under `python -O`. The
+        replacement `meta_by_id: Dict[str, Tuple[str, str]]` keyed by
+        memory_id eliminates the class of bug entirely — no parallel
+        lists to desync, no assert to strip.
+
+        We can't toggle -O at runtime, but we can prove the new shape
+        works correctly by inducing a hypothetical desync scenario:
+        force a specific ordering and verify per-row source flows to
+        the correct annotation regardless of insertion order."""
+        beam = BeamMemory(session_id="e2-dict", db_path=temp_db)
+        ids = beam.remember_batch([
+            {"content": "First from wiki", "source": "wiki"},
+            {"content": "Second from email", "source": "email"},
+            {"content": "Third from doc", "source": "doc"},
+        ])
+        # Each row's has_source annotation should match its OWN
+        # source, not an adjacent row's. This is the property the
+        # parallel-list pattern got wrong under refactor risk.
+        for memory_id, expected_source in zip(ids, ["wiki", "email", "doc"]):
+            rows = _annotation_rows(beam.conn, memory_id)
+            has_source = {r[1] for r in rows if r[0] == "has_source"}
+            assert expected_source in has_source, (
+                f"{memory_id} has_source mismatch: got {has_source}, "
+                f"expected '{expected_source}' — meta_by_id keying "
+                "broken or row identification regressed"
+            )
+
+    def test_deferred_commits_rollback_on_exception(self, temp_db):
+        """_deferred_commits must rollback (not commit) when the
+        body raises, so partial enrichment writes don't leak into the
+        DB. Verifies the exception path of the context manager."""
+        from mnemosyne.core.beam import _deferred_commits
+
+        beam = BeamMemory(session_id="e2-rollback", db_path=temp_db)
+        # Pre-state: 0 annotations.
+        beam.conn.execute("DELETE FROM annotations")
+        beam.conn.commit()
+
+        # Insert one row inside the deferred-commits scope, then raise.
+        try:
+            with _deferred_commits(beam.conn):
+                beam.conn.execute(
+                    "INSERT INTO annotations "
+                    "(memory_id, kind, value, source, confidence, created_at) "
+                    "VALUES ('test-id', 'mentions', 'Test', 'manual', 1.0, datetime('now'))"
+                )
+                raise RuntimeError("simulated post-write failure")
+        except RuntimeError:
+            pass
+
+        # The annotation should NOT have been committed.
+        count = beam.conn.execute(
+            "SELECT COUNT(*) FROM annotations WHERE memory_id = 'test-id'"
+        ).fetchone()[0]
+        assert count == 0, (
+            f"_deferred_commits failed to rollback on exception: "
+            f"{count} annotations leaked into the DB"
+        )

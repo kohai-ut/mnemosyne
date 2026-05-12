@@ -251,21 +251,39 @@ class EpisodicGraph:
     
     # --- Fact Extraction (Rule-based, zero LLM) ---
     
+    # Pattern-based extraction uses non-greedy character classes
+    # (`[a-zA-Z\s]+?`) adjacent to optional groups. Worst-case
+    # backtracking is O(n²)-ish on adversarial inputs (long
+    # documents with many capitalized words and intervening
+    # `is`/`has`/`uses`). At benchmark scale (250K rows including
+    # some imported documents) a single 10KB row can stall the
+    # whole ingest loop for seconds. Cap input length before regex
+    # to bound worst-case CPU per call. /review caught this as a
+    # 3-source HIGH on the E2 batch path. 4096 chars covers
+    # typical conversational rows in full and the first paragraph
+    # of imported documents.
+    _EXTRACT_FACTS_MAX_CONTENT_LEN = 4096
+
     def extract_facts(self, content: str, memory_id: str) -> List[Fact]:
         """
         Extract structured facts from content.
-        
+
         Pattern-based extraction of (subject, predicate, object) triples.
-        
+
         Args:
             content: Raw memory text
             memory_id: Source memory ID
-            
+
         Returns:
             List of Fact objects
         """
         facts = []
-        
+        # Bound input length so regex backtracking can't stall the
+        # ingest pipeline on pathological documents. See class-level
+        # _EXTRACT_FACTS_MAX_CONTENT_LEN note for the /review context.
+        if len(content) > self._EXTRACT_FACTS_MAX_CONTENT_LEN:
+            content = content[: self._EXTRACT_FACTS_MAX_CONTENT_LEN]
+
         # Pattern 1: "X is Y"
         is_pattern = r"\b([A-Z][a-zA-Z\s]+?)\s+is\s+(?:a|an|the)?\s*([a-zA-Z\s]+?)\b"
         for match in re.finditer(is_pattern, content):
