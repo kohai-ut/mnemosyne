@@ -33,6 +33,86 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def compute_fact_id(subject: str, predicate: str, object: str) -> str:
+    """Deterministic ID for a (subject, predicate, object) tuple.
+
+    Pre-fix `consolidated_facts.id` used
+    ``f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]``.
+    The 100-char truncation silently collided on long content: two
+    distinct facts with the same first ~95 chars after replace
+    produced identical PKs. The IntegrityError that resulted from
+    the INSERT was swallowed by the calling code at
+    `beam.py:_ingest_graph_and_veracity` (broad `except: pass` in
+    Phase 4), producing silent data loss.
+
+    Post-fix: SHA-256 hash of NFC-normalized SPO with length-prefix
+    framing. Always-uniform 27 chars (`cf_` + 24 hex). Properties:
+
+      - **Collision-safe across content lengths.** Hash never
+        truncates the input — long SPOs are encoded fully.
+      - **Smuggle-safe.** Length-prefix framing (``b"3:foo4:isax"``)
+        makes the encoding injective: two distinct SPO tuples can
+        never produce the same byte string regardless of whether a
+        component contains a separator-like character.
+        ``compute_fact_id("a\\x1f", "b", "c")`` no longer collides
+        with ``compute_fact_id("a", "\\x1fb", "c")``.
+      - **Unicode-stable.** NFC normalization applied per field so
+        ``"café"`` (NFC) and ``"café"`` (NFD) hash identically.
+      - **Codebase-consistent.** SHA-256 matches the digest choice
+        used elsewhere (`beam.py:770`, `importers/base.py:181`,
+        `importers/hindsight.py:144`).
+
+    Two facts with the same SPO produce the same ID (idempotency
+    preserved — `consolidate_fact`'s dedup still relies on SPO
+    equality, not ID equality). Distinct facts produce distinct
+    IDs regardless of content length.
+
+    Backward compat: existing rows keep their stored pre-fix IDs.
+    `consolidate_fact` continues to dedup by SPO match (the
+    SELECT WHERE subject=? AND predicate=? AND object=? at line
+    matching pre-fix), so old rows are found correctly on UPDATE.
+    Only newly inserted rows get the new format. Cross-format DBs
+    work indefinitely. `_fact_voice` reads the stored row id
+    (via ConsolidatedFact.id) rather than recomputing — preserves
+    RRF-key alignment for legacy rows.
+
+    /review history:
+      - Codex adv + Perf + Claude (3-source MED on E2 PR #82)
+        caught the original collision risk.
+      - Codex structured + Codex adv + Maintainability (3-source
+        GATE FAIL on this PR's commit 1) caught the \\x1f smuggling
+        + SHA-1/codebase-inconsistency + missing Unicode norm.
+
+    Raises:
+        TypeError: if any of subject/predicate/object is not a str.
+        ValueError: if any of subject/predicate/object is empty.
+    """
+    for name, value in (
+        ("subject", subject),
+        ("predicate", predicate),
+        ("object", object),
+    ):
+        if not isinstance(value, str):
+            raise TypeError(
+                f"compute_fact_id: {name} must be a str, got "
+                f"{type(value).__name__}"
+            )
+        if value == "":
+            raise ValueError(
+                f"compute_fact_id: {name} must be non-empty"
+            )
+    # NFC normalize each component so different normalization forms
+    # of the same logical text produce the same ID. Length-prefix
+    # framing makes the encoding injective — different SPO tuples
+    # cannot share a byte representation regardless of in-field
+    # separator characters.
+    parts: List[bytes] = []
+    for value in (subject, predicate, object):
+        b = unicodedata.normalize("NFC", value).encode("utf-8")
+        parts.append(f"{len(b)}:".encode("ascii") + b)
+    return "cf_" + hashlib.sha256(b"".join(parts)).hexdigest()[:24]
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +191,14 @@ class ConsolidatedFact:
     sources: List[str]
     veracity: str
     superseded: bool = False
+    # Stored `consolidated_facts.id` — present for rows fetched from
+    # the DB, None for transient ConsolidatedFact returns from
+    # consolidate_fact (which carries the value but doesn't re-roundtrip
+    # through this dataclass for the inserted row's id). Consumers like
+    # `polyphonic_recall._fact_voice` should use this when available so
+    # legacy-format rows in mixed-format DBs keep their stored IDs as
+    # RRF fusion keys instead of being recomputed to the new hash form.
+    id: Optional[str] = None
 
 
 class VeracityConsolidator:
@@ -354,8 +442,11 @@ class VeracityConsolidator:
             
             conflicts = cursor.fetchall()
             
-            # Insert new fact
-            fact_id = f"cf_{subject}_{predicate}_{object}".replace(" ", "_")[:100]
+            # Insert new fact. Hash-based ID is collision-safe across
+            # arbitrary content lengths; pre-fix the truncated f-string
+            # silently collided on long SPOs. See compute_fact_id for
+            # the rationale and backward-compat guarantees.
+            fact_id = compute_fact_id(subject, predicate, object)
             base_confidence = VERACITY_WEIGHTS.get(veracity, 0.8) * 0.5
             
             sources = [source] if source else []
@@ -533,7 +624,12 @@ class VeracityConsolidator:
                 last_seen=row["last_seen"],
                 sources=json.loads(row["sources_json"] or "[]"),
                 veracity=row["veracity"],
-                superseded=row["superseded_by"] is not None
+                superseded=row["superseded_by"] is not None,
+                # Preserve the stored id (pre-fix legacy or post-fix
+                # hash form) so callers like polyphonic_recall._fact_voice
+                # use it for RRF keys instead of recomputing — keeps
+                # mixed-format DBs internally consistent.
+                id=row["id"],
             ))
         
         return facts
@@ -706,9 +802,14 @@ if __name__ == "__main__":
     print(f"  Unresolved conflicts: {len(conflicts)}")
     
     # Test 4: Conflict resolution
+    # ID format changed from f-string to hash (collision safety fix).
+    # Use compute_fact_id rather than hard-coding "cf_Alice_is_developer".
     print("\nTest 4: Conflict resolution")
     if conflicts:
-        cons.resolve_conflict(conflicts[0]["id"], "cf_Alice_is_developer")
+        cons.resolve_conflict(
+            conflicts[0]["id"],
+            compute_fact_id("Alice", "is", "developer"),
+        )
         print(f"  Resolved conflict #{conflicts[0]['id']}")
     
     # Test 5: High-confidence summary

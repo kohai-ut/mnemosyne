@@ -470,3 +470,185 @@ def test_handle_recall_omits_weights_when_caller_does_not_supply():
             f"this overrides beam's env/default resolution. Either pass None "
             f"or omit the kwarg entirely."
         )
+
+# ---------------------------------------------------------------------------
+# profile_isolation tests — bank-based per-profile memory isolation (issue #72)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeBankName:
+    """Tests for _sanitize_bank_name static method."""
+
+    def test_normal_name_passes_through(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("work") == "work"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("my_profile") == "my_profile"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("test-123") == "test-123"
+
+    def test_lowercases(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("Work") == "work"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("MY_PROFILE") == "my_profile"
+
+    def test_replaces_special_chars_with_underscore(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("my profile") == "my_profile"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("my.profile") == "my_profile"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("my@profile!") == "my_profile"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("profile (v2)") == "profile_v2"
+
+    def test_collapses_consecutive_underscores(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("a  b") == "a_b"
+
+    def test_strips_leading_trailing_underscores(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("_leading") == "leading"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("trailing_") == "trailing"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("___both___") == "both"
+
+    def test_path_traversal_chars_are_sanitized(self):
+        """.. and / replaced with underscores during sanitization, not rejected."""
+        assert MnemosyneMemoryProvider._sanitize_bank_name("../../etc") == "etc"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("a/b") == "a_b"
+
+    def test_caps_length_at_64(self):
+        long_name = "a" * 100
+        result = MnemosyneMemoryProvider._sanitize_bank_name(long_name)
+        assert len(result) == 64
+        assert result == "a" * 64
+
+    def test_empty_returns_default(self):
+        assert MnemosyneMemoryProvider._sanitize_bank_name("") == "default"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("   ") == "default"
+        assert MnemosyneMemoryProvider._sanitize_bank_name("!!!") == "default"
+
+    def test_numeric_start_is_valid(self):
+        """Numbers are alphanumeric, pass the start-is-alnum check."""
+        assert MnemosyneMemoryProvider._sanitize_bank_name("123name") == "123name"
+
+
+class TestResolveProfileBank:
+    """Tests for _resolve_profile_bank method."""
+
+    def test_uses_agent_identity_first(self):
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = "sphinx"
+        provider._hermes_home = "/home/user/.hermes/profiles/work"
+        assert provider._resolve_profile_bank() == "sphinx"
+
+    def test_skips_generic_identities(self):
+        """'primary', 'default', 'none' fall through to hermes_home."""
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = "primary"
+        provider._hermes_home = "/home/user/.hermes/profiles/work"
+        assert provider._resolve_profile_bank() == "work"
+
+    def test_falls_back_to_hermes_home_basename(self):
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = ""
+        provider._hermes_home = "/home/user/.hermes/profiles/work"
+        assert provider._resolve_profile_bank() == "work"
+
+    def test_skips_default_hermes_home(self):
+        """'.hermes' and 'hermes' basenames fall through to 'default'."""
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = ""
+        provider._hermes_home = "/home/user/.hermes"
+        assert provider._resolve_profile_bank() == "default"
+
+    def test_returns_default_when_no_signal(self):
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = ""
+        provider._hermes_home = ""
+        assert provider._resolve_profile_bank() == "default"
+
+    def test_sanitizes_hermes_home_with_special_chars(self):
+        provider = MnemosyneMemoryProvider()
+        provider._agent_identity = ""
+        provider._hermes_home = "/home/user/.hermes/profiles/My Profile (v2)"
+        assert provider._resolve_profile_bank() == "my_profile_v2"
+
+
+class TestInitializeProfileIsolation:
+    """Tests for initialize() with profile_isolation flag."""
+
+    def test_uses_mnemosyne_when_isolation_enabled(self, monkeypatch):
+        """profile_isolation=true routes through Mnemosyne(bank=...)."""
+        provider = MnemosyneMemoryProvider()
+        mem = MagicMock()
+        mem.beam = MagicMock()
+
+        # Mnemosyne is imported locally inside initialize()
+        import mnemosyne
+        monkeypatch.setattr(mnemosyne, "Mnemosyne", MagicMock(return_value=mem))
+
+        provider.initialize(
+            session_id="test123",
+            agent_identity="sphinx",
+            hermes_home="/home/user/.hermes/profiles/sphinx",
+            profile_isolation=True,
+        )
+        mnemosyne.Mnemosyne.assert_called_once()
+        kwargs = mnemosyne.Mnemosyne.call_args.kwargs
+        assert kwargs["bank"] == "sphinx"
+        assert kwargs["session_id"] == "hermes_test123"
+
+    def test_uses_beam_memory_when_isolation_disabled(self, monkeypatch):
+        """Default: uses BeamMemory directly (legacy behavior)."""
+        provider = MnemosyneMemoryProvider()
+        beam_mock = MagicMock()
+        beam_constructor = MagicMock(return_value=beam_mock)
+        monkeypatch.setattr("hermes_memory_provider._get_beam_class", lambda: beam_constructor)
+
+        provider.initialize(session_id="test123", hermes_home="/some/path")
+        beam_constructor.assert_called_once_with(session_id="hermes_test123")
+
+    def test_uses_default_bank_when_no_profile_signal(self, monkeypatch):
+        """Isolation ON but no profile signal -> 'default' bank."""
+        provider = MnemosyneMemoryProvider()
+        mem = MagicMock()
+        mem.beam = MagicMock()
+
+        import mnemosyne
+        monkeypatch.setattr(mnemosyne, "Mnemosyne", MagicMock(return_value=mem))
+
+        provider.initialize(
+            session_id="test123",
+            agent_identity="",
+            hermes_home="",
+            profile_isolation=True,
+        )
+        kwargs = mnemosyne.Mnemosyne.call_args.kwargs
+        assert kwargs["bank"] == "default"
+
+    def test_survives_mnemosyne_failure(self, monkeypatch):
+        """Mnemosyne(bank=...) failure logs warning, does not crash."""
+        provider = MnemosyneMemoryProvider()
+
+        def boom(*a, **kw):
+            raise RuntimeError("db locked")
+
+        import mnemosyne
+        monkeypatch.setattr(mnemosyne, "Mnemosyne", MagicMock(side_effect=boom))
+
+        # Must not raise
+        provider.initialize(
+            session_id="test123",
+            agent_identity="sphinx",
+            profile_isolation=True,
+        )
+        assert provider._beam is None
+
+    def test_skips_generic_identity_uses_hermes_home(self, monkeypatch):
+        """Identity 'primary' skipped, hermes_home basename used instead."""
+        provider = MnemosyneMemoryProvider()
+        mem = MagicMock()
+        mem.beam = MagicMock()
+
+        import mnemosyne
+        monkeypatch.setattr(mnemosyne, "Mnemosyne", MagicMock(return_value=mem))
+
+        provider.initialize(
+            session_id="test",
+            agent_identity="primary",
+            hermes_home="/home/user/.hermes/profiles/work",
+            profile_isolation=True,
+        )
+        kwargs = mnemosyne.Mnemosyne.call_args.kwargs
+        assert kwargs["bank"] == "work"

@@ -239,6 +239,9 @@ class MnemosyneMemoryProvider(MemoryProvider):
         self._auto_sleep_enabled = os.environ.get("MNEMOSYNE_AUTO_SLEEP_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
         self._ignore_patterns: List[str] = []  # Regex patterns to filter from memory
         self._skip_contexts = {"cron", "flush", "subagent", "background", "skill_loop"}  # Agent contexts to skip
+        # Profile memory isolation: when enabled, each Hermes profile gets its own
+        # Mnemosyne bank (separate SQLite DB). Default OFF for backward compatibility.
+        self._profile_isolation_enabled = False
         # Tracked so shutdown() can wait briefly for in-flight consolidation
         # before clearing the host LLM backend, preventing the post-timeout
         # daemon thread from racing with unregister and falling through to
@@ -295,6 +298,14 @@ class MnemosyneMemoryProvider(MemoryProvider):
                 patterns = [str(p).strip() for p in patterns if str(p).strip()]
             self._ignore_patterns = patterns
 
+        # profile_isolation: separate DB per Hermes profile (bank-based).
+        # Default OFF. When enabled, each profile derives its own Mnemosyne bank.
+        profile_isolation = kwargs.get("profile_isolation")
+        if profile_isolation is None:
+            profile_isolation = self._read_config_key("profile_isolation")
+        if profile_isolation is not None:
+            self._profile_isolation_enabled = bool(profile_isolation)
+
     def _should_filter(self, content: str) -> bool:
         """Check if content matches any ignore pattern. Returns True if it should be skipped."""
         if not self._ignore_patterns:
@@ -327,6 +338,7 @@ class MnemosyneMemoryProvider(MemoryProvider):
             {"key": "sleep_threshold", "description": "Working memory count before auto-sleep triggers", "default": 50},
             {"key": "vector_type", "description": "Vector storage type (note: not yet wired to BeamMemory at runtime; reserved for future use)", "choices": ["float32", "int8", "bit"], "default": "int8"},
             {"key": "ignore_patterns", "description": "Regex patterns to filter from memory storage (one per line in config, or comma-separated). Memories matching any pattern are skipped.", "default": []},
+            {"key": "profile_isolation", "description": "Enable per-profile memory isolation via Mnemosyne banks. Each Hermes profile gets its own SQLite database under mnemosyne/data/banks/<profile>/. Default false for backward compatibility.", "default": False},
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -345,11 +357,77 @@ class MnemosyneMemoryProvider(MemoryProvider):
         except Exception:
             logger.debug("Mnemosyne: could not persist config values", exc_info=True)
 
+    import re
+    _BANK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+    @staticmethod
+    def _sanitize_bank_name(raw: str) -> str:
+        """Sanitize a raw string into a valid bank name.
+
+        Bank names become directory names. Rules:
+        - Only [a-z0-9_-], max 64 chars
+        - Must start with alphanumeric
+        - Reject .. and / for path traversal safety
+        - Fallback to 'default' if raw is empty or un-sanitizable
+        """
+        if not raw:
+            return "default"
+        # Lowercase and replace spaces/separators with underscore
+        sanitized = raw.lower().strip()
+        # Replace any disallowed characters with underscore
+        sanitized = "".join(
+            c if c.isalnum() or c in "_-" else "_"
+            for c in sanitized
+        )
+        # Collapse consecutive underscores
+        while "__" in sanitized:
+            sanitized = sanitized.replace("__", "_")
+        # Strip leading/trailing underscores/hyphens
+        sanitized = sanitized.strip("_-")
+        # Ensure starts with alphanumeric
+        if not sanitized or not sanitized[0].isalnum():
+            sanitized = "b_" + sanitized if sanitized else "default"
+        # Truncate to 64 chars
+        if len(sanitized) > 64:
+            sanitized = sanitized[:64].rstrip("_-")
+        # Reject path traversal
+        if ".." in sanitized or "/" in sanitized:
+            return "default"
+        return sanitized or "default"
+
+    def _resolve_profile_bank(self) -> str:
+        """Derive a bank name from the active Hermes profile.
+
+        Precedence:
+        1. agent_identity (explicit profile name from Hermes)
+        2. hermes_home basename (derived from profile directory)
+        3. Fallback to 'default' (backward-compatible shared DB)
+        """
+        # Try agent_identity first (most reliable)
+        identity = getattr(self, "_agent_identity", None) or ""
+        if identity and identity.lower() not in ("primary", "default", "none", ""):
+            bank = self._sanitize_bank_name(identity)
+            if bank != "default":
+                return bank
+
+        # Fall back to hermes_home basename
+        hermes_home = getattr(self, "_hermes_home", "") or ""
+        if hermes_home:
+            from pathlib import Path
+            basename = Path(hermes_home).name
+            if basename and basename.lower() not in (".hermes", "hermes", "default", ""):
+                bank = self._sanitize_bank_name(basename)
+                if bank != "default":
+                    return bank
+
+        return "default"
+
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize Mnemosyne beam for this session."""
         self._agent_context = kwargs.get("agent_context", "primary")
         self._platform = kwargs.get("platform", "cli")
         self._hermes_home = kwargs.get("hermes_home", "")
+        self._agent_identity = kwargs.get("agent_identity", None) or ""
 
         # Apply provider-specific config from kwargs (Hermes-passed) or config.yaml fallback
         self._apply_provider_config(kwargs)
@@ -361,9 +439,26 @@ class MnemosyneMemoryProvider(MemoryProvider):
         self._session_id = f"hermes_{session_id}"
 
         try:
-            BeamMemory = _get_beam_class()
-            self._beam = BeamMemory(session_id=self._session_id)
-            logger.info("Mnemosyne initialized: session=%s", self._session_id)
+            if self._profile_isolation_enabled:
+                # Route through Mnemosyne(bank=...) so BankManager handles
+                # directory creation, canonical path resolution, and isolates
+                # memories per Hermes profile.
+                bank_name = self._resolve_profile_bank()
+                from mnemosyne import Mnemosyne
+                mem = Mnemosyne(
+                    session_id=self._session_id,
+                    bank=bank_name,
+                    channel_id=kwargs.get("channel_id", ""),
+                )
+                self._beam = mem.beam
+                logger.info(
+                    "Mnemosyne initialized (profile isolation ON): session=%s, bank=%s, db=%s",
+                    self._session_id, bank_name, mem.db_path,
+                )
+            else:
+                BeamMemory = _get_beam_class()
+                self._beam = BeamMemory(session_id=self._session_id)
+                logger.info("Mnemosyne initialized: session=%s", self._session_id)
         except Exception as e:
             logger.warning("Mnemosyne init failed: %s", e)
             self._beam = None
