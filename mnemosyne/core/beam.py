@@ -163,12 +163,95 @@ DEGRADE_BATCH_SIZE = int(os.environ.get("MNEMOSYNE_DEGRADE_BATCH", "100"))
 SMART_COMPRESS = os.environ.get("MNEMOSYNE_SMART_COMPRESS", "1") not in ("0", "false", "no")
 TIER3_MAX_CHARS = int(os.environ.get("MNEMOSYNE_TIER3_MAX_CHARS", "300"))
 
+def _env_float(name: str, default: float) -> float:
+    """Parse an env var as float; fall back to `default` on empty or
+    invalid values rather than crashing at module load.
+
+    Pre-fix `float(os.environ.get("MNEMOSYNE_STATED_WEIGHT", "1.0"))`
+    raised ValueError when the env var was set to empty (`export
+    MNEMOSYNE_STATED_WEIGHT=`) because `os.environ.get` returns `""`
+    (the value), not the default — `float("")` then crashed import
+    BEFORE the C32 override-WARN could fire. Robust path: strip,
+    treat empty as "fall back," log a WARN on actually-bad values.
+    """
+    raw = os.environ.get(name, "")
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a valid float; falling back to default %s",
+            name, raw[:80], default,
+        )
+        return default
+
+
 # Veracity weighting (memory confidence)
-STATED_WEIGHT = float(os.environ.get("MNEMOSYNE_STATED_WEIGHT", "1.0"))
-INFERRED_WEIGHT = float(os.environ.get("MNEMOSYNE_INFERRED_WEIGHT", "0.7"))
-TOOL_WEIGHT = float(os.environ.get("MNEMOSYNE_TOOL_WEIGHT", "0.5"))
-IMPORTED_WEIGHT = float(os.environ.get("MNEMOSYNE_IMPORTED_WEIGHT", "0.6"))
-UNKNOWN_WEIGHT = float(os.environ.get("MNEMOSYNE_UNKNOWN_WEIGHT", "0.8"))
+STATED_WEIGHT = _env_float("MNEMOSYNE_STATED_WEIGHT", 1.0)
+INFERRED_WEIGHT = _env_float("MNEMOSYNE_INFERRED_WEIGHT", 0.7)
+TOOL_WEIGHT = _env_float("MNEMOSYNE_TOOL_WEIGHT", 0.5)
+IMPORTED_WEIGHT = _env_float("MNEMOSYNE_IMPORTED_WEIGHT", 0.6)
+UNKNOWN_WEIGHT = _env_float("MNEMOSYNE_UNKNOWN_WEIGHT", 0.8)
+
+
+def _detect_veracity_weight_overrides() -> List[str]:
+    """C32: return a list of `MNEMOSYNE_*_WEIGHT` env vars that are
+    set to a non-empty value.
+
+    Filters out empty-string values (e.g., `export MNEMOSYNE_STATED_WEIGHT=`)
+    since those don't actually override anything — `_env_float` falls
+    back to the default for empties. Counting them as overrides would
+    confuse the WARN message.
+    """
+    return [
+        name for name in (
+            "MNEMOSYNE_STATED_WEIGHT",
+            "MNEMOSYNE_INFERRED_WEIGHT",
+            "MNEMOSYNE_TOOL_WEIGHT",
+            "MNEMOSYNE_IMPORTED_WEIGHT",
+            "MNEMOSYNE_UNKNOWN_WEIGHT",
+        )
+        if os.environ.get(name, "").strip()
+    ]
+
+
+_VERACITY_WARN_EMITTED = False
+
+
+def _warn_about_veracity_weight_overrides(force: bool = False) -> bool:
+    """Log a WARNING if any `MNEMOSYNE_*_WEIGHT` env var is overridden.
+
+    Idempotent per-process: subsequent calls return False without
+    re-emitting unless `force=True` (tests use this to verify the WARN
+    fires per call). Module-load calls this once below. The guard
+    matters for multi-worker setups (uvicorn `--workers`, pytest-xdist)
+    where each worker reloads the module — each process gets one WARN
+    instead of N per worker startup.
+
+    Returns True iff a warning was emitted on this call.
+    """
+    global _VERACITY_WARN_EMITTED
+    if _VERACITY_WARN_EMITTED and not force:
+        return False
+    overrides = _detect_veracity_weight_overrides()
+    if not overrides:
+        return False
+    logger.warning(
+        "Veracity weight env overrides detected: %s. Recall scoring will "
+        "honor the override, but consolidation Bayesian compounding "
+        "(veracity_consolidation.VERACITY_WEIGHTS) does NOT — the two "
+        "will drift. Set matching values in veracity_consolidation.py "
+        "OR accept that 'consolidated-as-N also ranks at N' invariant "
+        "is broken until the consolidator is taught the same overrides.",
+        ", ".join(overrides),
+    )
+    _VERACITY_WARN_EMITTED = True
+    return True
+
+
+_warn_about_veracity_weight_overrides()
 
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
@@ -2468,7 +2551,14 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: episodic rows never key into wm_vec_sims
+                        # (that dict holds working_memory ids only). Set
+                        # 0.0 explicitly rather than lookup-that-always-
+                        # returns-default, so post-run analysis isn't
+                        # misled into thinking dense similarity was
+                        # computed. The entity/fact-matched episodic
+                        # paths don't compute ep dense sim themselves.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -2581,7 +2671,14 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": 0.0,
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: episodic rows never key into wm_vec_sims
+                        # (that dict holds working_memory ids only). Set
+                        # 0.0 explicitly rather than lookup-that-always-
+                        # returns-default, so post-run analysis isn't
+                        # misled into thinking dense similarity was
+                        # computed. The entity/fact-matched episodic
+                        # paths don't compute ep dense sim themselves.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
@@ -2890,7 +2987,16 @@ class BeamMemory:
                         "tier": "episodic",
                         "score": round(score, 4),
                         "keyword_score": round(relevance, 4),
-                        "dense_score": round(wm_vec_sims.get(row["id"], 0.0), 4),
+                        # C30: dense_score is 0.0 by design for EM
+                        # fallback rows — they reach this loop precisely
+                        # because the vec/FTS-driven episodic path
+                        # produced no candidates (no `sim` is computed
+                        # here). Pre-fix this line looked up
+                        # `wm_vec_sims[row["id"]]` which always returned
+                        # 0.0 since `row["id"]` is an episodic id, not
+                        # a working-memory id — same numeric value,
+                        # misleading provenance. Now explicit.
+                        "dense_score": 0.0,
                         "fts_score": 0.0,
                         "importance": row["importance"],
                         "recall_count": row["recall_count"] or 0,
