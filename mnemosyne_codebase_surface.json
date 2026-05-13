@@ -2,7 +2,7 @@
   "project": {
     "name": "Mnemosyne",
     "package": "mnemosyne-memory",
-    "version": "2.5.0",
+    "version": "2.7.0",
     "author": "Abdias J",
     "license": "MIT",
     "description": "Zero-Dependency, Sub-Millisecond AI Memory System using SQLite",
@@ -503,9 +503,9 @@
   },
 
   "plugins_yamls": {
-    "root plugin.yaml": {"name": "mnemosyne", "version": "2.5", "tools": 15, "hooks": 3},
-    "hermes_plugin/plugin.yaml": {"name": "mnemosyne", "version": "2.5", "tools": 15, "hooks": 3},
-    "hermes_memory_provider/plugin.yaml": {"name": "mnemosyne", "version": "2.5", "tools": 15, "hooks": 3}
+    "root plugin.yaml": {"name": "mnemosyne", "version": "2.6", "tools": 15, "hooks": 3},
+    "hermes_plugin/plugin.yaml": {"name": "mnemosyne", "version": "2.6", "tools": 15, "hooks": 3},
+    "hermes_memory_provider/plugin.yaml": {"name": "mnemosyne", "version": "2.6", "tools": 15, "hooks": 3}
   },
 
   "scripts": {

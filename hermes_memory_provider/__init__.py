@@ -51,7 +51,7 @@ REMEMBER_SCHEMA = {
     "name": "mnemosyne_remember",
     "description": (
         "Store a durable memory in Mnemosyne. Use for ANY fact, preference, "
-        "insight, or context that should persist across sessions. Higher importance "
+        "identity, insight, or context that should persist across sessions. Higher importance "
         "(0.0-1.0) surfaces the memory more often. Use scope='global' for user-level "
         "facts; scope='session' for conversation-specific context. Use valid_until "
         "(ISO date YYYY-MM-DD) for time-bound facts. Use extract_entities=True to "
@@ -66,7 +66,7 @@ REMEMBER_SCHEMA = {
         "properties": {
             "content": {"type": "string", "description": "The memory content to store."},
             "importance": {"type": "number", "description": "Importance 0.0-1.0. Default 0.5.", "default": 0.5},
-            "source": {"type": "string", "description": "Source tag: preference, fact, insight, task, etc.", "default": "user"},
+            "source": {"type": "string", "description": "Source tag: preference, fact, insight, identity, task, etc.", "default": "user"},
             "scope": {"type": "string", "description": "'session' (default) or 'global'.", "default": "session"},
             "valid_until": {"type": "string", "description": "Optional expiry date YYYY-MM-DD.", "default": ""},
             "extract_entities": {"type": "boolean", "description": "Extract named entities for fuzzy recall. Default False.", "default": False},
@@ -527,10 +527,15 @@ class MnemosyneMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         if self._beam:
+            # Merge resolution (PR #106 + C27): keep PR #106's description
+            # update that adds "identity" to the recognized memory kinds
+            # (matches the auto-capture for identity-significant feelings
+            # added in that PR), and keep C27's three-branch structure
+            # (working / init-failed-visible / skip-context-silent).
             return (
                 "# Mnemosyne Memory\n"
                 "Active (native local memory). Use mnemosyne_remember to store ANY "
-                "durable fact, preference, or insight. Use mnemosyne_recall to search. "
+                "durable fact, preference, identity, or insight. Use mnemosyne_recall to search. "
                 "The legacy memory tool is deprecated for durable storage — Mnemosyne is primary."
             )
         # C27: when init failed (as opposed to a deliberate skip-context),
@@ -598,6 +603,8 @@ class MnemosyneMemoryProvider(MemoryProvider):
                     importance=0.3,
                     extract_entities=True,
                 )
+                # Check for identity-significant signals in user content
+                self._capture_identity_signals(user_content)
             if assistant_content and len(assistant_content) > 10 and not self._should_filter(assistant_content):
                 self._beam.remember(
                     content=f"[ASSISTANT] {assistant_content[:800]}",
@@ -610,6 +617,37 @@ class MnemosyneMemoryProvider(MemoryProvider):
                 self._maybe_auto_sleep()
         except Exception as e:
             logger.debug("Mnemosyne sync_turn failed: %s", e)
+
+    # Identity-significant expressions the user may voice about themselves or
+    # their relationship to their work. When a match is found, the memory is
+    # saved with source="identity" and higher importance so it survives
+    # consolidation and remains recallable across sessions.
+    _IDENTITY_SIGNALS: List[str] = [
+        "feeling like",
+        "imposter",
+        "impostor",
+        "barely know",
+        "don't know my own",
+        "don't even know how",
+        "want them to feel",
+        "i'm proud",
+        "i feel like a",
+        "i don't know how to",
+    ]
+
+    def _capture_identity_signals(self, user_content: str) -> None:
+        content_lower = user_content.lower()
+        for signal in self._IDENTITY_SIGNALS:
+            if signal in content_lower:
+                # Save identity memory with high importance for durable recall
+                self._beam.remember(
+                    content=f"[IDENTITY] {user_content[:400]}",
+                    source="identity",
+                    importance=0.85,
+                    scope="global",
+                    veracity="stated",
+                )
+                break  # One identity memory per turn
 
     def _maybe_auto_sleep(self) -> None:
         try:
