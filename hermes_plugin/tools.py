@@ -25,7 +25,7 @@ REMEMBER_SCHEMA = {
             },
             "source": {
                 "type": "string",
-                "description": "Source of the memory (preference, fact, conversation, etc.)"
+                "description": "Source of the memory (preference, fact, identity, conversation, etc.)"
             },
             "valid_until": {
                 "type": "string",
