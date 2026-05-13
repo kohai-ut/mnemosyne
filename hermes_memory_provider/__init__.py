@@ -259,12 +259,23 @@ class MnemosyneMemoryProvider(MemoryProvider):
 
         Truncates the exception message to 200 chars so a verbose SQLite
         error (or similar) can't bloat downstream tool-call payloads.
+        Collapses whitespace (including embedded newlines) into single
+        spaces so the message can't break the system-prompt structure or
+        look like multi-line instructions to the LLM -- defense in depth
+        against an exception whose ``str()`` includes user-controllable
+        text (e.g. a filesystem path supplied via MNEMOSYNE_DATA_DIR).
         Returns a generic string when init was never attempted (e.g. a
         subagent-context session that legitimately skipped initialize()).
         """
         if self._init_error is None:
             return "Mnemosyne not initialized"
         msg = str(self._init_error)
+        # Collapse all whitespace (\n, \r, \t, runs of spaces) into a
+        # single space. Codex finding #3: a multi-line exception text or
+        # one containing tab-separated instruction-like content could
+        # otherwise reach the LLM as structured input.
+        import re
+        msg = re.sub(r"\s+", " ", msg).strip()
         if len(msg) > 200:
             msg = msg[:200] + "..."
         return f"{type(self._init_error).__name__}: {msg}"
@@ -445,8 +456,15 @@ class MnemosyneMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize Mnemosyne beam for this session."""
-        # C27: clear stale init-error state from any prior init attempt so a
-        # successful re-init returns the provider to a clean slate.
+        # C27: clear stale state from any prior init attempt so a re-init
+        # returns the provider to a clean slate. _beam reset is critical
+        # for the primary->skip-context re-init case (codex review finding
+        # #1): without it, a previously-initialized primary session that
+        # later re-initialized into a subagent context would leave the old
+        # _beam active, causing system_prompt_block() to report "Active"
+        # and handle_tool_call() to silently write into the wrong session.
+        # _init_error reset complements this for the failure-recovery case.
+        self._beam = None
         self._init_error = None
 
         self._agent_context = kwargs.get("agent_context", "primary")
@@ -617,11 +635,16 @@ class MnemosyneMemoryProvider(MemoryProvider):
             # C27: structured response carries the actual failure reason
             # instead of a generic "not initialized" string. Status field
             # is parseable by tool consumers; `reason` is human-readable for
-            # the agent to relay to the user.
+            # the agent to relay to the user. The `error` field is kept
+            # alongside `status` so callers using the prior "if 'error' in
+            # payload" pattern (codex review finding #4) don't silently
+            # misclassify unavailable as success.
+            reason = self._init_error_reason()
             return json.dumps({
                 "status": "memory_unavailable",
                 "tool": tool_name,
-                "reason": self._init_error_reason(),
+                "reason": reason,
+                "error": f"Mnemosyne unavailable: {reason}",
             })
         try:
             if tool_name == "mnemosyne_remember":
